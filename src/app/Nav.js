@@ -21,6 +21,9 @@ export default function Nav() {
       <Link asChild>
         <NextLink href="/twitch/me/">Twitch Me</NextLink>
       </Link>
+      <Link asChild>
+        <NextLink href="/twitch/debug/">Twitch Debug</NextLink>
+      </Link>
     </Flex>
   );
 }

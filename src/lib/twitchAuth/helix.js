@@ -3,6 +3,64 @@ import { getClientId } from './oauth';
 
 const API_BASE = 'https://api.twitch.tv/helix';
 
+const HELIX_LOG_KEY = 't24_helix_latest_v1';
+
+function safeParseJson(text) {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
+function readHelixLog() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(HELIX_LOG_KEY);
+    if (!raw) return null;
+    const parsed = safeParseJson(raw);
+    if (!parsed.ok) return null;
+    return parsed.value && typeof parsed.value === 'object' ? parsed.value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeHelixLog(obj) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(HELIX_LOG_KEY, JSON.stringify(obj));
+  } catch {
+  }
+}
+
+function logHelixCall({ path, query, url, ok, status, durationMs, errorText, responseJson }) {
+  const now = Date.now();
+  const prev = readHelixLog();
+  const byPath = prev && typeof prev.byPath === 'object' ? prev.byPath : {};
+
+  const entry = {
+    ts: now,
+    path,
+    query,
+    url,
+    ok: Boolean(ok),
+    status: typeof status === 'number' ? status : null,
+    durationMs: typeof durationMs === 'number' ? durationMs : null,
+    errorText: errorText ? String(errorText) : null,
+    response: responseJson && typeof responseJson === 'object' ? responseJson : null,
+  };
+
+  writeHelixLog({
+    version: 1,
+    ts: now,
+    byPath: {
+      ...byPath,
+      [String(path || '')]: entry,
+    },
+  });
+}
+
 export async function apiGet(path, query = {}) {
   const token = getAccessToken();
   if (!token) throw new Error('Not authenticated');
@@ -18,6 +76,8 @@ export async function apiGet(path, query = {}) {
     if (v !== undefined && v !== null && v !== '') url.searchParams.append(k, String(v));
   });
 
+  const startedAt = Date.now();
+
   const res = await fetch(url.toString(), {
     headers: {
       'Client-Id': getClientId(),
@@ -28,10 +88,31 @@ export async function apiGet(path, query = {}) {
 
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
+    logHelixCall({
+      path,
+      query,
+      url: url.toString(),
+      ok: false,
+      status: res.status,
+      durationMs: Date.now() - startedAt,
+      errorText: txt,
+      responseJson: null,
+    });
     throw new Error(`Helix ${path} failed: ${res.status} ${txt}`);
   }
 
-  return await res.json();
+  const json = await res.json();
+  logHelixCall({
+    path,
+    query,
+    url: url.toString(),
+    ok: true,
+    status: res.status,
+    durationMs: Date.now() - startedAt,
+    errorText: null,
+    responseJson: json,
+  });
+  return json;
 }
 
 export async function getMe() {

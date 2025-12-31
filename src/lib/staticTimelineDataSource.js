@@ -196,17 +196,20 @@ export function createStaticTimelineDataSource() {
       const enabled = all.filter((c) => c.isEnabled);
       const enabledSet = new Set(enabled.map((c) => c.id));
 
-      const requested = Array.isArray(channelIds)
-        ? channelIds.map((s) => String(s || '').trim()).filter(Boolean)
-        : null;
+      const selected =
+        channelIds === null
+          ? enabled.map((c) => c.id)
+          : Array.isArray(channelIds)
+            ? channelIds.map((s) => String(s || '').trim()).filter(Boolean)
+            : enabled.map((c) => c.id);
 
-      const selected = (requested && requested.length ? requested : enabled.map((c) => c.id)).filter((id) => enabledSet.has(id));
+      const selectedFiltered = selected.filter((id) => enabledSet.has(id));
 
       const windowStart = new Date(origin - past * dayMs);
       const windowEnd = new Date(origin + future * dayMs);
 
       const cacheKey = JSON.stringify({
-        selected: selected.slice().sort(),
+        selected: selectedFiltered.slice().sort(),
         ws: windowStart.toISOString(),
         we: windowEnd.toISOString(),
       });
@@ -218,7 +221,7 @@ export function createStaticTimelineDataSource() {
 
       const allMutable = loadChannels();
       const enabledMutable = allMutable.filter((c) => c.isEnabled);
-      const selectedChannels = enabledMutable.filter((c) => selected.includes(c.id));
+      const selectedChannels = enabledMutable.filter((c) => selectedFiltered.includes(c.id));
 
       // Resolve broadcaster IDs if missing (stored back into localStorage for reuse)
       await resolveBroadcasterIds(enabledMutable);
@@ -238,7 +241,7 @@ export function createStaticTimelineDataSource() {
         windowStart: windowStartIso,
         windowEnd: windowEndIso,
         channels: enabledMutable,
-        selectedChannelIds: selected,
+        selectedChannelIds: channelIds === null ? null : selectedFiltered,
         scheduleSegments,
         videos,
       };

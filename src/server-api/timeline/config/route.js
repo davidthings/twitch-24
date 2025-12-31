@@ -49,12 +49,15 @@ export async function POST(req) {
 
   const cfg = body && typeof body === 'object' ? body : {};
 
-  const selectedChannelIds = Array.isArray(cfg.selectedChannelIds)
-    ? cfg.selectedChannelIds
-        .map((s) => String(s || '').trim())
-        .filter(Boolean)
-        .slice(0, 200)
-    : null;
+  const selectedChannelIds =
+    cfg.selectedChannelIds === null
+      ? null
+      : Array.isArray(cfg.selectedChannelIds)
+        ? cfg.selectedChannelIds
+            .map((s) => String(s || '').trim())
+            .filter(Boolean)
+            .slice(0, 200)
+        : undefined;
 
   const pastDays = cfg.pastDays !== undefined ? clampInt(cfg.pastDays, 0, 365) : null;
   const futureDays = cfg.futureDays !== undefined ? clampInt(cfg.futureDays, 0, 365) : null;
@@ -67,7 +70,7 @@ export async function POST(req) {
   const customTimeZone = customTimeZoneRaw && isValidTimeZone(customTimeZoneRaw) ? customTimeZoneRaw.trim() : null;
 
   const timelineConfig = {
-    ...(selectedChannelIds ? { selectedChannelIds } : {}),
+    ...(selectedChannelIds !== undefined ? { selectedChannelIds } : {}),
     ...(pastDays !== null ? { pastDays } : {}),
     ...(futureDays !== null ? { futureDays } : {}),
     ...(displayTimeZoneMode ? { displayTimeZoneMode } : {}),

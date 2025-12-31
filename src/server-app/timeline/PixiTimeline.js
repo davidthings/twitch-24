@@ -24,6 +24,46 @@ function hashStringToIndex(s, mod) {
   return mod > 0 ? h % mod : 0;
 }
 
+function hslToRgbInt(h, s, l) {
+  const hh = ((Number(h) % 360) + 360) % 360;
+  const ss = Math.max(0, Math.min(100, Number(s))) / 100;
+  const ll = Math.max(0, Math.min(100, Number(l))) / 100;
+
+  const c = (1 - Math.abs(2 * ll - 1)) * ss;
+  const x = c * (1 - Math.abs(((hh / 60) % 2) - 1));
+  const m = ll - c / 2;
+
+  let r1 = 0;
+  let g1 = 0;
+  let b1 = 0;
+
+  if (hh < 60) {
+    r1 = c;
+    g1 = x;
+  } else if (hh < 120) {
+    r1 = x;
+    g1 = c;
+  } else if (hh < 180) {
+    g1 = c;
+    b1 = x;
+  } else if (hh < 240) {
+    g1 = x;
+    b1 = c;
+  } else if (hh < 300) {
+    r1 = x;
+    b1 = c;
+  } else {
+    r1 = c;
+    b1 = x;
+  }
+
+  const r = Math.round((r1 + m) * 255);
+  const g = Math.round((g1 + m) * 255);
+  const b = Math.round((b1 + m) * 255);
+
+  return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+}
+
 function easeInOutCubic(t) {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
@@ -111,7 +151,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
   const [status, setStatus] = useState('');
 
   const [channels, setChannels] = useState([]);
-  const [selectedChannelIds, setSelectedChannelIds] = useState([]);
+  const [selectedChannelIds, setSelectedChannelIds] = useState(null);
   const [previewChannelId, setPreviewChannelId] = useState(null);
   const [pastDays, setPastDays] = useState(10);
   const [futureDays, setFutureDays] = useState(5);
@@ -348,11 +388,6 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     requestAnimationFrame(step);
   }
 
-  const palette = useMemo(
-    () => [0x60a5fa, 0xa78bfa, 0x34d399, 0xfbbf24, 0xf87171, 0x22c55e, 0x38bdf8, 0xfb7185, 0xf97316, 0x94a3b8],
-    []
-  );
-
   const colorByChannelId = useMemo(() => {
     const m = new Map();
     for (let i = 0; i < channels.length; i += 1) {
@@ -361,12 +396,15 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
       if (stored !== null) {
         m.set(c.id, stored);
       } else {
-        const idx = hashStringToIndex(c.id || c.login, palette.length);
-        m.set(c.id, palette[idx]);
+        const base = c.login || c.id || '';
+        const hue = hashStringToIndex(base, 360);
+        const sat = 68;
+        const light = 54 + (hashStringToIndex(`${base}_l`, 7) - 3) * 3;
+        m.set(c.id, hslToRgbInt(hue, sat, light));
       }
     }
     return m;
-  }, [channels, palette]);
+  }, [channels]);
 
   const colorCssByChannelId = useMemo(() => {
     const m = new Map();
@@ -425,9 +463,10 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     const blend = layoutBlendRef.current;
     const tableBlendLocal = tableBlendRef.current;
 
-    const selectedSet = new Set(selectedChannelIds.length ? selectedChannelIds : channels.map((c) => c.id));
+    const selectedBase = selectedChannelIds === null ? channels.map((c) => c.id) : selectedChannelIds;
+    const selectedSet = new Set(selectedBase);
     const previewActive =
-      previewChannelId && selectedChannelIds.length && !selectedSet.has(previewChannelId) ? previewChannelId : null;
+      previewChannelId && selectedChannelIds !== null && !selectedSet.has(previewChannelId) ? previewChannelId : null;
     if (previewActive) selectedSet.add(previewActive);
     const orderedSelected = channels.filter((c) => selectedSet.has(c.id)).map((c) => c.id);
     const channelOrder = new Map(orderedSelected.map((id, idx) => [id, idx]));
@@ -1201,9 +1240,13 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
 
       const cfgPast = cfg?.pastDays !== undefined ? clampInt(cfg.pastDays, 0, 365) : 10;
       const cfgFuture = cfg?.futureDays !== undefined ? clampInt(cfg.futureDays, 0, 365) : 5;
-      const cfgSelected = Array.isArray(cfg?.selectedChannelIds)
-        ? cfg.selectedChannelIds.map((s) => String(s || '').trim()).filter(Boolean)
-        : [];
+      const rawSelected = cfg && typeof cfg === 'object' ? cfg.selectedChannelIds : undefined;
+      const cfgSelected =
+        rawSelected === null
+          ? null
+          : Array.isArray(rawSelected)
+            ? rawSelected.map((s) => String(s || '').trim()).filter(Boolean)
+            : null;
       const cfgModeRaw = cfg?.displayTimeZoneMode !== undefined ? String(cfg.displayTimeZoneMode) : 'user';
       const cfgMode =
         cfgModeRaw === 'utc' || cfgModeRaw === 'user' || cfgModeRaw === 'channel' || cfgModeRaw === 'custom' ? cfgModeRaw : 'user';
@@ -1213,7 +1256,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
 
       setPastDays(cfgPast);
       setFutureDays(cfgFuture);
-      if (cfgSelected.length) setSelectedChannelIds(cfgSelected);
+      setSelectedChannelIds(cfgSelected);
       setDisplayTimeZoneMode(cfgMode);
       setCustomTimeZone(cfgCustomTz);
 
@@ -1228,7 +1271,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
         if (!mounted) return;
 
         applyTimelineJson(json);
-        setSelectedChannelIds((prev) => (cfgSelected.length ? cfgSelected : prev.length ? prev : json.selectedChannelIds || []));
+        setSelectedChannelIds(cfgSelected);
 
         const pixi = await import('pixi.js');
         ensureEventGraphics(pixi);
@@ -1279,11 +1322,12 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     let cancelled = false;
 
     const effectiveSelectedIds = (() => {
-      if (!selectedChannelIds.length) return selectedChannelIds;
+      if (selectedChannelIds === null) return null;
+      const base = Array.isArray(selectedChannelIds) ? selectedChannelIds : [];
       const id = String(previewChannelId || '').trim();
-      if (!id) return selectedChannelIds;
-      if (selectedChannelIds.includes(id)) return selectedChannelIds;
-      return [...selectedChannelIds, id];
+      if (!id) return base;
+      if (base.includes(id)) return base;
+      return [...base, id];
     })();
 
     (async () => {
@@ -1460,9 +1504,30 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
               Channels
             </Text>
 
+            <Flex gap="2" wrap="wrap">
+              <Button
+                type="button"
+                variant="soft"
+                onClick={() => {
+                  setSelectedChannelIds([]);
+                }}
+              >
+                Uncheck all
+              </Button>
+              <Button
+                type="button"
+                variant="soft"
+                onClick={() => {
+                  setSelectedChannelIds(null);
+                }}
+              >
+                Check all
+              </Button>
+            </Flex>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {channels.map((c, idx) => {
-                const checked = selectedChannelIds.length ? selectedChannelIds.includes(c.id) : true;
+                const checked = selectedChannelIds === null ? true : selectedChannelIds.includes(c.id);
                 const hex = colorCssByChannelId.get(c.id) || '#94a3b8';
                 const previewing = !checked && previewChannelId === c.id;
                 return (
@@ -1488,7 +1553,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
                         onChange={(e) => {
                           const nextChecked = e.target.checked;
                           setSelectedChannelIds((prev) => {
-                            const base = prev.length ? prev : channels.map((x) => x.id);
+                            const base = prev === null ? channels.map((x) => x.id) : Array.isArray(prev) ? prev : [];
                             if (nextChecked) return Array.from(new Set([...base, c.id]));
                             return base.filter((id) => id !== c.id);
                           });

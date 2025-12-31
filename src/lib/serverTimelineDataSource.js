@@ -28,7 +28,9 @@ export function createServerTimelineDataSource() {
       url.searchParams.set('originMs', String(originMs));
       url.searchParams.set('pastDays', String(pastDays));
       url.searchParams.set('futureDays', String(futureDays));
-      if (channelIds && channelIds.length) {
+      if (channelIds === null) {
+        // omit to mean "all"
+      } else if (Array.isArray(channelIds)) {
         url.searchParams.set('channelIds', channelIds.join(','));
       }
 

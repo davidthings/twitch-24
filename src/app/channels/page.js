@@ -61,6 +61,29 @@ function asFiniteNumber(v, fallback = 0) {
 }
 
 const DISCOVERY_CACHE_KEY = 't24_channel_discovery_cache_v1';
+const DISCOVERY_FILTERS_KEY = 't24_channel_discovery_filters_v1';
+
+function loadDiscoveryFilters() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(DISCOVERY_FILTERS_KEY);
+    if (!raw) return null;
+    const parsed = safeParseJson(raw);
+    if (!parsed.ok) return null;
+    const v = parsed.value;
+    return v && typeof v === 'object' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveDiscoveryFilters(filters) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(DISCOVERY_FILTERS_KEY, JSON.stringify(filters));
+  } catch {
+  }
+}
 
 function loadDiscoveryCache(cacheKey) {
   if (typeof window === 'undefined') return null;
@@ -99,6 +122,7 @@ export default function StaticChannelsPage() {
   const [gameQuery, setGameQuery] = useState('');
   const [gameOptions, setGameOptions] = useState([]);
   const [selectedGame, setSelectedGame] = useState(null);
+  const [recentGames, setRecentGames] = useState([]);
   const [startAt, setStartAt] = useState('');
   const [endAt, setEndAt] = useState('');
   const [endStartAt, setEndStartAt] = useState('');
@@ -121,10 +145,56 @@ export default function StaticChannelsPage() {
     setChannels(initial);
     setExportText(exportChannelsJson(initial));
 
-    const now = Date.now();
-    setEndAt(formatDateTimeLocalValue(now));
-    setStartAt(formatDateTimeLocalValue(now - 7 * 24 * 60 * 60 * 1000));
+    const saved = loadDiscoveryFilters();
+    if (saved) {
+      const sg = saved.selectedGame && typeof saved.selectedGame === 'object' ? saved.selectedGame : null;
+      const rg = Array.isArray(saved.recentGames) ? saved.recentGames : [];
+      if (sg && sg.id && sg.name) setSelectedGame({ id: String(sg.id), name: String(sg.name), boxArtUrl: String(sg.boxArtUrl || '') });
+      setRecentGames(
+        rg
+          .map((g) => ({ id: String(g?.id || ''), name: String(g?.name || ''), boxArtUrl: String(g?.boxArtUrl || '') }))
+          .filter((g) => g.id && g.name)
+          .slice(0, 12)
+      );
+      if (typeof saved.gameQuery === 'string') setGameQuery(saved.gameQuery);
+      if (typeof saved.startAt === 'string') setStartAt(saved.startAt);
+      if (typeof saved.endAt === 'string') setEndAt(saved.endAt);
+      if (typeof saved.endStartAt === 'string') setEndStartAt(saved.endStartAt);
+      if (typeof saved.endEndAt === 'string') setEndEndAt(saved.endEndAt);
+      if (saved.minViewCount !== undefined) setMinViewCount(String(saved.minViewCount));
+      if (typeof saved.hideExisting === 'boolean') setHideExisting(saved.hideExisting);
+      if (typeof saved.sortBy === 'string') setSortBy(saved.sortBy);
+      if (typeof saved.sortDir === 'string') setSortDir(saved.sortDir === 'asc' ? 'asc' : 'desc');
+    } else {
+      const now = Date.now();
+      setEndAt(formatDateTimeLocalValue(now));
+      setStartAt(formatDateTimeLocalValue(now - 7 * 24 * 60 * 60 * 1000));
+    }
   }, []);
+
+  useEffect(() => {
+    let timeout = null;
+    timeout = setTimeout(() => {
+      saveDiscoveryFilters({
+        version: 1,
+        selectedGame,
+        recentGames,
+        gameQuery,
+        startAt,
+        endAt,
+        endStartAt,
+        endEndAt,
+        minViewCount,
+        hideExisting,
+        sortBy,
+        sortDir,
+      });
+    }, 350);
+
+    return () => {
+      if (timeout) clearTimeout(timeout);
+    };
+  }, [selectedGame, recentGames, gameQuery, startAt, endAt, endStartAt, endEndAt, minViewCount, hideExisting, sortBy, sortDir]);
 
   useEffect(() => {
     setExportText(exportChannelsJson(channels));
@@ -411,6 +481,17 @@ export default function StaticChannelsPage() {
     window.location.assign(toPath('/twitch/login/'));
   }
 
+  function onSelectGame(g) {
+    if (!g || !g.id) return;
+    const next = { id: String(g.id), name: String(g.name || ''), boxArtUrl: String(g.boxArtUrl || '') };
+    setSelectedGame(next);
+    setRecentGames((prev) => {
+      const base = Array.isArray(prev) ? prev : [];
+      const deduped = [next, ...base.filter((x) => String(x?.id || '') !== next.id)];
+      return deduped.slice(0, 12);
+    });
+  }
+
   function move(channelId, dir) {
     const idx = channels.findIndex((c) => c.id === channelId);
     if (idx < 0) return;
@@ -542,11 +623,31 @@ export default function StaticChannelsPage() {
                     key={g.id}
                     type="button"
                     variant={selectedGame?.id === g.id ? 'solid' : 'soft'}
-                    onClick={() => setSelectedGame(g)}
+                    onClick={() => onSelectGame(g)}
                   >
                     {g.name}
                   </Button>
                 ))}
+              </Flex>
+            ) : null}
+
+            {recentGames.length ? (
+              <Flex direction="column" gap="1">
+                <Text size="2" color="gray">
+                  Recent games
+                </Text>
+                <Flex gap="2" wrap="wrap">
+                  {recentGames.map((g) => (
+                    <Button
+                      key={`recent_${g.id}`}
+                      type="button"
+                      variant={selectedGame?.id === g.id ? 'solid' : 'soft'}
+                      onClick={() => onSelectGame(g)}
+                    >
+                      {g.name}
+                    </Button>
+                  ))}
+                </Flex>
               </Flex>
             ) : null}
 

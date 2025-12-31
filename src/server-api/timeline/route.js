@@ -22,9 +22,10 @@ export async function GET(req) {
   const pastDays = pastDaysRaw ? Math.max(0, Math.min(365, Number(pastDaysRaw))) : 10;
   const futureDays = futureDaysRaw ? Math.max(0, Math.min(365, Number(futureDaysRaw))) : 5;
 
+  const hasChannelIds = url.searchParams.has('channelIds');
   const channelIdsRaw = url.searchParams.get('channelIds');
-  const channelIds = channelIdsRaw
-    ? channelIdsRaw
+  const channelIds = hasChannelIds
+    ? String(channelIdsRaw || '')
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean)
@@ -49,7 +50,7 @@ export async function GET(req) {
   });
 
   const enabledIdSet = new Set(channels.map((c) => c.id));
-  const selectedIds = (channelIds && channelIds.length ? channelIds : channels.map((c) => c.id)).filter((id) => enabledIdSet.has(id));
+  const selectedIds = (channelIds === null ? channels.map((c) => c.id) : channelIds).filter((id) => enabledIdSet.has(id));
 
   const scheduleSegments = selectedIds.length
     ? await prisma.twitchScheduleSegment.findMany({
