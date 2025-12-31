@@ -4,17 +4,22 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Flex, Heading, Text } from '@radix-ui/themes';
 
 import { exportChannelsJson, importChannelsJson, loadChannels, saveChannels } from '@/lib/staticChannels';
+import { apiGet } from '@/lib/twitchAuth/helix';
+import { toPath } from '@/lib/twitchAuth/oauth';
+import { clearToken } from '@/lib/twitchAuth/tokenStorage';
+import { useTwitchAuth } from '@/lib/twitchAuth/useTwitchAuth';
 
 function normalizeLogin(s) {
   return String(s || '').trim().toLowerCase();
 }
 
-function makeNewChannel({ login }) {
+function makeNewChannel({ login, displayName, broadcasterId }) {
   const l = normalizeLogin(login);
   return {
     id: l || `ch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
     login: l,
-    displayName: l,
+    displayName: String(displayName || '').trim() || l,
+    broadcasterId: String(broadcasterId || '').trim() || null,
     colorHex: null,
     timeZone: null,
     isEnabled: true,
@@ -22,12 +27,66 @@ function makeNewChannel({ login }) {
   };
 }
 
+function formatDateTimeLocalValue(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const ms = d.getTime();
+  if (!Number.isFinite(ms)) return '';
+  const localMs = ms - d.getTimezoneOffset() * 60 * 1000;
+  return new Date(localMs).toISOString().slice(0, 16);
+}
+
+function safeParseJson(text) {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+const DISCOVERY_CACHE_KEY = 't24_channel_discovery_cache_v1';
+
+function loadDiscoveryCache(cacheKey) {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(DISCOVERY_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = safeParseJson(raw);
+    if (!parsed.ok) return null;
+    const v = parsed.value;
+    if (!v || typeof v !== 'object') return null;
+    if (v.key !== cacheKey) return null;
+    if (typeof v.ts !== 'number') return null;
+    if (Date.now() - v.ts > 10 * 60 * 1000) return null;
+    return v.data || null;
+  } catch {
+    return null;
+  }
+}
+
+function saveDiscoveryCache(cacheKey, data) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(DISCOVERY_CACHE_KEY, JSON.stringify({ key: cacheKey, ts: Date.now(), data }));
+  } catch {
+  }
+}
+
 export default function StaticChannelsPage() {
+  const auth = useTwitchAuth();
   const [channels, setChannels] = useState([]);
   const [status, setStatus] = useState('');
   const [newLogin, setNewLogin] = useState('');
   const [importText, setImportText] = useState('');
   const [exportText, setExportText] = useState('');
+
+  const [gameQuery, setGameQuery] = useState('');
+  const [gameOptions, setGameOptions] = useState([]);
+  const [selectedGame, setSelectedGame] = useState(null);
+  const [startAt, setStartAt] = useState('');
+  const [endAt, setEndAt] = useState('');
+  const [discoverStatus, setDiscoverStatus] = useState('');
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoverResults, setDiscoverResults] = useState([]);
 
   const loadedRef = useRef(false);
 
@@ -38,6 +97,10 @@ export default function StaticChannelsPage() {
     const initial = loadChannels();
     setChannels(initial);
     setExportText(exportChannelsJson(initial));
+
+    const now = Date.now();
+    setEndAt(formatDateTimeLocalValue(now));
+    setStartAt(formatDateTimeLocalValue(now - 7 * 24 * 60 * 60 * 1000));
   }, []);
 
   useEffect(() => {
@@ -65,6 +128,163 @@ export default function StaticChannelsPage() {
     persist(next);
     setNewLogin('');
     setStatus('');
+  }
+
+  async function searchGames() {
+    const q = String(gameQuery || '').trim();
+    if (!q) {
+      setGameOptions([]);
+      return;
+    }
+    setDiscoverStatus('');
+    try {
+      const json = await apiGet('/search/categories', { query: q, first: 10 });
+      const data = Array.isArray(json?.data) ? json.data : [];
+      const opts = data
+        .map((x) => ({
+          id: String(x?.id || ''),
+          name: String(x?.name || ''),
+          boxArtUrl: String(x?.box_art_url || ''),
+        }))
+        .filter((x) => x.id && x.name);
+      setGameOptions(opts);
+    } catch (e) {
+      setDiscoverStatus(e instanceof Error ? e.message : 'Failed to search games');
+      setGameOptions([]);
+    }
+  }
+
+  async function discoverChannelsFromVods() {
+    setDiscoverStatus('');
+
+    if (!auth?.authed) {
+      setDiscoverStatus('Not authenticated. Go to Twitch Login first.');
+      return;
+    }
+
+    const gameId = String(selectedGame?.id || '').trim();
+    if (!gameId) {
+      setDiscoverStatus('Pick a game first');
+      return;
+    }
+
+    const startMs = startAt ? new Date(startAt).getTime() : NaN;
+    const endMs = endAt ? new Date(endAt).getTime() : NaN;
+
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+      setDiscoverStatus('Provide a valid start and end time');
+      return;
+    }
+    if (endMs < startMs) {
+      setDiscoverStatus('End time must be after start time');
+      return;
+    }
+
+    const cacheKey = JSON.stringify({ gameId, startMs, endMs, language: 'en', type: 'archive' });
+    const cached = loadDiscoveryCache(cacheKey);
+    if (cached && Array.isArray(cached)) {
+      setDiscoverResults(cached);
+      setDiscoverStatus('Loaded cached results');
+      return;
+    }
+
+    setDiscoverLoading(true);
+    try {
+      const channelByUserId = new Map();
+      let cursor = null;
+      let reachedPastStart = false;
+
+      for (let page = 0; page < 5; page += 1) {
+        const json = await apiGet('/videos', {
+          game_id: gameId,
+          first: 100,
+          type: 'archive',
+          language: 'en',
+          sort: 'time',
+          ...(cursor ? { after: cursor } : {}),
+        });
+
+        const vids = Array.isArray(json?.data) ? json.data : [];
+        if (vids.length === 0) break;
+
+        for (const v of vids) {
+          const createdAtIso = String(v?.created_at || v?.published_at || '').trim();
+          const createdAtMs = createdAtIso ? new Date(createdAtIso).getTime() : NaN;
+          if (!Number.isFinite(createdAtMs)) continue;
+
+          if (createdAtMs < startMs) {
+            reachedPastStart = true;
+            break;
+          }
+          if (createdAtMs > endMs) {
+            continue;
+          }
+
+          const userId = String(v?.user_id || '').trim();
+          const login = normalizeLogin(v?.user_login);
+          const displayName = String(v?.user_name || '').trim();
+          if (!userId || !login) continue;
+
+          const prev = channelByUserId.get(userId) || {
+            userId,
+            login,
+            displayName: displayName || login,
+            latestVodAtMs: createdAtMs,
+            vodCount: 0,
+            sampleVodUrl: String(v?.url || '').trim() || null,
+            sampleVodTitle: String(v?.title || '').trim() || null,
+          };
+
+          prev.vodCount += 1;
+          prev.latestVodAtMs = Math.max(prev.latestVodAtMs || 0, createdAtMs);
+          if (!prev.sampleVodUrl) prev.sampleVodUrl = String(v?.url || '').trim() || null;
+          if (!prev.sampleVodTitle) prev.sampleVodTitle = String(v?.title || '').trim() || null;
+          if (!prev.displayName || prev.displayName === prev.login) {
+            prev.displayName = displayName || prev.login;
+          }
+
+          channelByUserId.set(userId, prev);
+        }
+
+        if (reachedPastStart) break;
+
+        cursor = String(json?.pagination?.cursor || '').trim() || null;
+        if (!cursor) break;
+      }
+
+      const results = Array.from(channelByUserId.values())
+        .sort((a, b) => (b.latestVodAtMs || 0) - (a.latestVodAtMs || 0))
+        .slice(0, 200);
+
+      setDiscoverResults(results);
+      saveDiscoveryCache(cacheKey, results);
+      setDiscoverStatus(`Found ${results.length} channel(s)`);
+    } catch (e) {
+      setDiscoverStatus(e instanceof Error ? e.message : 'Discovery failed');
+    } finally {
+      setDiscoverLoading(false);
+    }
+  }
+
+  function addDiscoveredChannel(row) {
+    const login = normalizeLogin(row?.login);
+    const broadcasterId = String(row?.userId || '').trim();
+    const displayName = String(row?.displayName || '').trim();
+    if (!login) return;
+
+    if (channels.some((c) => c.login === login || c.id === login || (broadcasterId && c.broadcasterId === broadcasterId))) {
+      setStatus('Channel already exists');
+      return;
+    }
+
+    const next = [...channels, makeNewChannel({ login, displayName, broadcasterId })].map((c, i) => ({ ...c, sortOrder: i }));
+    persist(next);
+    setStatus(`Added ${displayName || login}`);
+  }
+
+  function onReauth() {
+    clearToken();
+    window.location.assign(toPath('/twitch/login/'));
   }
 
   function move(channelId, dir) {
@@ -141,12 +361,182 @@ export default function StaticChannelsPage() {
             Static mode channel config stored in localStorage.
           </Text>
           <Text size="2" color="gray">
+            Twitch auth: {auth?.ready ? (auth.authed ? `signed in as ${auth.user?.display_name || auth.user?.login || 'user'}` : 'not signed in') : 'loading'}
+          </Text>
+          <Text size="2" color="gray">
             Total: {channels.length} | Enabled: {enabledCount}
           </Text>
           {status ? (
             <Text size="2" color="gray">
               {status}
             </Text>
+          ) : null}
+          <Flex gap="2" wrap="wrap">
+            <Button type="button" variant="soft" onClick={onReauth}>
+              Re-auth Twitch
+            </Button>
+          </Flex>
+        </Flex>
+      </Card>
+
+      <Card>
+        <Flex direction="column" gap="3">
+          <Heading size="3">Discover channels from VODs</Heading>
+          <Text size="2" color="gray">
+            Global discovery using Helix Videos by game. Filters: type=VOD (archive), language=en, VOD start time range.
+          </Text>
+
+          <Flex direction="column" gap="2">
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                Game search
+              </Text>
+              <Flex gap="2" align="end" wrap="wrap">
+                <input
+                  value={gameQuery}
+                  onChange={(e) => setGameQuery(e.target.value)}
+                  placeholder="e.g. Fortnite"
+                  style={{
+                    width: 320,
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    border: '1px solid rgba(255,255,255,0.18)',
+                    background: 'rgba(255,255,255,0.06)',
+                    color: 'inherit',
+                  }}
+                />
+                <Button type="button" variant="soft" onClick={searchGames} disabled={!auth?.authed}>
+                  Search games
+                </Button>
+              </Flex>
+            </label>
+
+            {gameOptions.length ? (
+              <Flex gap="2" wrap="wrap">
+                {gameOptions.map((g) => (
+                  <Button
+                    key={g.id}
+                    type="button"
+                    variant={selectedGame?.id === g.id ? 'solid' : 'soft'}
+                    onClick={() => setSelectedGame(g)}
+                  >
+                    {g.name}
+                  </Button>
+                ))}
+              </Flex>
+            ) : null}
+
+            <Text size="2" color="gray">
+              Selected game: {selectedGame?.name || '—'}
+            </Text>
+          </Flex>
+
+          <Flex gap="3" wrap="wrap" align="end">
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                Start time
+              </Text>
+              <input
+                type="datetime-local"
+                value={startAt}
+                onChange={(e) => setStartAt(e.target.value)}
+                style={{
+                  width: 240,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: 'inherit',
+                }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                End time
+              </Text>
+              <input
+                type="datetime-local"
+                value={endAt}
+                onChange={(e) => setEndAt(e.target.value)}
+                style={{
+                  width: 240,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: 'inherit',
+                }}
+              />
+            </label>
+
+            <Button type="button" onClick={discoverChannelsFromVods} disabled={!auth?.authed || discoverLoading}>
+              {discoverLoading ? 'Discovering…' : 'Discover'}
+            </Button>
+          </Flex>
+
+          {discoverStatus ? (
+            <Text size="2" color="gray">
+              {discoverStatus}
+            </Text>
+          ) : null}
+
+          {discoverResults.length ? (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: 'left', padding: '8px 6px' }}>Channel</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px' }}>Latest VOD</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px' }}>VODs matched</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px' }}>Example</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px' }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {discoverResults.map((r) => {
+                    const exists = channels.some((c) => c.login === r.login || (c.broadcasterId && c.broadcasterId === r.userId));
+                    return (
+                      <tr key={r.userId}>
+                        <td style={{ padding: '8px 6px' }}>
+                          <Text size="2">
+                            {r.displayName} ({r.login})
+                          </Text>
+                        </td>
+                        <td style={{ padding: '8px 6px' }}>
+                          <Text size="2" color="gray">
+                            {r.latestVodAtMs ? new Date(r.latestVodAtMs).toISOString() : '-'}
+                          </Text>
+                        </td>
+                        <td style={{ padding: '8px 6px' }}>
+                          <Text size="2" color="gray">
+                            {r.vodCount}
+                          </Text>
+                        </td>
+                        <td style={{ padding: '8px 6px', maxWidth: 420 }}>
+                          {r.sampleVodUrl ? (
+                            <a href={r.sampleVodUrl} target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>
+                              <Text size="2" color="gray" style={{ overflowWrap: 'anywhere' }}>
+                                {r.sampleVodTitle || r.sampleVodUrl}
+                              </Text>
+                            </a>
+                          ) : (
+                            <Text size="2" color="gray">
+                              -
+                            </Text>
+                          )}
+                        </td>
+                        <td style={{ padding: '8px 6px', whiteSpace: 'nowrap' }}>
+                          <Button type="button" onClick={() => addDiscoveredChannel(r)} disabled={exists}>
+                            {exists ? 'Added' : 'Add'}
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           ) : null}
         </Flex>
       </Card>
