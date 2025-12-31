@@ -252,6 +252,15 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
   }
 
   function animateLayoutTo(nextLayout) {
+    if (nextLayout === 'table') {
+      layoutAnimRef.current = (layoutAnimRef.current || 0) + 1;
+      layoutBlendRef.current = 0;
+      setLayoutBlend(0);
+      redrawTimeline();
+      requestRenderRef.current();
+      return;
+    }
+
     const target = nextLayout === 'spiral' ? 1 : 0;
     const start = layoutBlendRef.current;
     if (Math.abs(target - start) < 0.001) {
@@ -474,6 +483,62 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
       axes.lineStyle(1, 0xffffff, 0.14);
       axes.moveTo(-999999, baselineY);
       axes.lineTo(999999, baselineY);
+    } else if (layout === 'table') {
+      const pxPerDay = 900;
+      const leftGutter = 120;
+      const headerY = 42;
+      const rowTop = 70;
+      const channelLaneGap = 10;
+      const rowPadY = 14;
+      const rowHeight = Math.max(56, channelCount * channelLaneGap + rowPadY * 2);
+      const rows = pastDays + futureDays + 1;
+
+      const labels = [];
+
+      const tableTop = headerY;
+      const tableBottom = rowTop + rows * rowHeight;
+
+      gridGfx.lineStyle(1, 0xffffff, 0.06);
+
+      for (let h = 0; h <= 24; h += 1) {
+        const x = leftGutter + (h / 24) * pxPerDay;
+        const isMajor = h % 6 === 0;
+        gridGfx.lineStyle(1, 0xffffff, isMajor ? 0.08 : 0.04);
+        gridGfx.moveTo(x, tableTop);
+        gridGfx.lineTo(x, tableBottom);
+
+        if (h < 24 && isMajor) {
+          labels.push({
+            text: String(h).padStart(2, '0'),
+            x,
+            y: 28,
+          });
+        }
+      }
+
+      for (let r = 0; r < rows; r += 1) {
+        const dayOffset = futureDays - r;
+        const dayStartMs = originMidnightMs + dayOffset * dayMs;
+
+        const yStart = rowTop + r * rowHeight;
+        const yEnd = yStart + rowHeight;
+
+        gridGfx.lineStyle(1, 0xffffff, 0.08);
+        gridGfx.moveTo(leftGutter, yStart);
+        gridGfx.lineTo(leftGutter + pxPerDay, yStart);
+
+        gridGfx.lineStyle(1, 0xffffff, 0.04);
+        gridGfx.moveTo(leftGutter, yEnd);
+        gridGfx.lineTo(leftGutter + pxPerDay, yEnd);
+
+        labels.push({
+          text: formatDateLabel(dayStartMs, axesTimeZone),
+          x: leftGutter - 60,
+          y: yStart + rowHeight * 0.5,
+        });
+      }
+
+      setGridLabels(labels);
     } else {
       gridGfx.lineStyle(1, 0xffffff, 0.08);
 
@@ -593,6 +658,58 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
       const blendClamped = Math.max(0, Math.min(1, blend));
       const thickness = baseThickness * (1 - 0.625 * blendClamped);
       const pad = thickness * 0.75 + 8;
+
+      if (layout === 'table') {
+        const pxPerDay = 900;
+        const leftGutter = 120;
+        const rowTop = 70;
+        const channelLaneGap = 10;
+        const rowPadY = 14;
+        const rowHeight = Math.max(56, channelCount * channelLaneGap + rowPadY * 2);
+        const rows = pastDays + futureDays + 1;
+
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        g.lineStyle(thickness, color, alpha);
+
+        for (let r = 0; r < rows; r += 1) {
+          const dayOffset = futureDays - r;
+          const dayStartMs = originMidnightMs + dayOffset * dayMs;
+          const dayEndMs = dayStartMs + dayMs;
+
+          const segStart = Math.max(aMs, dayStartMs);
+          const segEnd = Math.min(bMs, dayEndMs);
+          if (!(segEnd > segStart)) continue;
+
+          const fracA = (segStart - dayStartMs) / dayMs;
+          const fracB = (segEnd - dayStartMs) / dayMs;
+          const xA = leftGutter + fracA * pxPerDay;
+          const xB = leftGutter + fracB * pxPerDay;
+
+          const yRow = rowTop + r * rowHeight;
+          const yLane = yRow + rowPadY + idx * channelLaneGap;
+
+          g.moveTo(xA, yLane);
+          g.lineTo(xB, yLane);
+
+          minX = Math.min(minX, xA, xB);
+          maxX = Math.max(maxX, xA, xB);
+          minY = Math.min(minY, yLane);
+          maxY = Math.max(maxY, yLane);
+        }
+
+        if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY) && g.__hitRect) {
+          g.__hitRect.x = minX - pad;
+          g.__hitRect.y = minY - pad;
+          g.__hitRect.width = Math.max(1, maxX - minX + pad * 2);
+          g.__hitRect.height = Math.max(1, maxY - minY + pad * 2);
+        }
+
+        continue;
+      }
 
       if (blendIsZero) {
         const linearA = computeLinearPoint(aMs, idx, originMs);
@@ -1221,6 +1338,12 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
             onClick={() => setLayout('spiral')}
           >
             Spiral
+          </Button>
+          <Button
+            variant={layout === 'table' ? 'solid' : 'soft'}
+            onClick={() => setLayout('table')}
+          >
+            Table
           </Button>
           <Button variant="soft" onClick={() => animateOriginTo(Date.now())}>
             Center to NOW
