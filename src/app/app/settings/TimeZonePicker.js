@@ -45,6 +45,7 @@ export default function TimeZonePicker({
   initialTimeZone = 'UTC',
   fieldName = 'timeZone',
   recentsStorageKey = 't24_recent_time_zones_v1',
+  variant = 'default',
   onChange,
 }) {
   const [timeZone, setTimeZone] = useState(initialTimeZone || 'UTC');
@@ -232,25 +233,53 @@ export default function TimeZonePicker({
     }
   }
 
+  const isCompact = variant === 'compact';
+
   return (
     <Flex direction="column" gap="2">
       <input type="hidden" name={fieldName} value={timeZone} />
 
       {!editing ? (
-        <Flex gap="2" align="center" wrap="wrap">
-          <Text size="2" color="gray">
-            Selected
-          </Text>
-          <Text size="2" style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
-            {timeZone}
-          </Text>
-          <Button variant="soft" type="button" onClick={() => setEditing(true)}>
-            Change
-          </Button>
-          <Text size="2" color="gray">
-            {preview}
-          </Text>
-        </Flex>
+        isCompact ? (
+          <Flex direction="column" gap="1">
+            <Flex gap="2" align="center" wrap="wrap">
+              <Text size="2" color="gray">
+                Selected
+              </Text>
+              <Text
+                size="2"
+                style={{
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                  maxWidth: '100%',
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                {timeZone}
+              </Text>
+              <Button variant="soft" type="button" onClick={() => setEditing(true)}>
+                Change
+              </Button>
+            </Flex>
+            <Text size="2" color="gray" style={{ overflowWrap: 'anywhere' }}>
+              {preview}
+            </Text>
+          </Flex>
+        ) : (
+          <Flex gap="2" align="center" wrap="wrap">
+            <Text size="2" color="gray">
+              Selected
+            </Text>
+            <Text size="2" style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
+              {timeZone}
+            </Text>
+            <Button variant="soft" type="button" onClick={() => setEditing(true)}>
+              Change
+            </Button>
+            <Text size="2" color="gray">
+              {preview}
+            </Text>
+          </Flex>
+        )
       ) : (
         <Flex direction="column" gap="2">
           <Flex gap="2" align="center" wrap="wrap">
@@ -260,7 +289,8 @@ export default function TimeZonePicker({
               onChange={(e) => setTzInput(e.target.value)}
               placeholder="e.g. Europe/Paris, Los Angeles, PST"
               style={{
-                width: 360,
+                width: isCompact ? '100%' : 360,
+                maxWidth: '100%',
                 padding: '10px 12px',
                 borderRadius: 8,
                 border: '1px solid rgba(255,255,255,0.18)',
@@ -312,6 +342,7 @@ export default function TimeZonePicker({
                 border: '1px solid rgba(255,255,255,0.18)',
                 borderRadius: 8,
                 padding: 8,
+                width: isCompact ? '100%' : undefined,
                 maxHeight: 220,
                 overflow: 'auto',
                 background: 'rgba(255,255,255,0.03)',

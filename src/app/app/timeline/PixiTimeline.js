@@ -89,7 +89,10 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
   const renderNowRef = useRef(() => {});
 
   const layoutAnimRef = useRef(0);
+  const tableAnimRef = useRef(0);
   const originAnimRef = useRef(0);
+
+  const prevLayoutRef = useRef('linear');
 
   const worldRef = useRef(null);
   const gridGfxRef = useRef(null);
@@ -117,6 +120,9 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
 
   const [layoutBlend, setLayoutBlend] = useState(0);
   const layoutBlendRef = useRef(0);
+
+  const [tableBlend, setTableBlend] = useState(0);
+  const tableBlendRef = useRef(0);
 
   const [items, setItems] = useState([]);
   const itemsRef = useRef([]);
@@ -251,45 +257,56 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
     requestRenderRef.current();
   }
 
-  function animateLayoutTo(nextLayout) {
-    if (nextLayout === 'table') {
-      layoutAnimRef.current = (layoutAnimRef.current || 0) + 1;
-      layoutBlendRef.current = 0;
-      setLayoutBlend(0);
-      redrawTimeline();
-      requestRenderRef.current();
-      return;
-    }
-
-    const target = nextLayout === 'spiral' ? 1 : 0;
-    const start = layoutBlendRef.current;
+  function animateScalar(ref, setState, animRef, target, durationMs, onDone) {
+    const start = ref.current;
     if (Math.abs(target - start) < 0.001) {
-      layoutBlendRef.current = target;
-      setLayoutBlend(target);
+      ref.current = target;
+      setState(target);
       redrawTimeline();
       requestRenderRef.current();
+      if (typeof onDone === 'function') onDone();
       return;
     }
 
-    const myId = (layoutAnimRef.current || 0) + 1;
-    layoutAnimRef.current = myId;
+    const myId = (animRef.current || 0) + 1;
+    animRef.current = myId;
 
     const startT = performance.now();
-    const durationMs = 260;
-
     const step = (now) => {
-      if (layoutAnimRef.current !== myId) return;
+      if (animRef.current !== myId) return;
       const t = Math.max(0, Math.min(1, (now - startT) / durationMs));
       const eased = easeInOutCubic(t);
       const v = start + (target - start) * eased;
-      layoutBlendRef.current = v;
-      setLayoutBlend(v);
+      ref.current = v;
+      setState(v);
       redrawTimeline();
       requestRenderRef.current();
       if (t < 1) requestAnimationFrame(step);
+      else if (typeof onDone === 'function') onDone();
     };
 
     requestAnimationFrame(step);
+  }
+
+  function animateLayoutTo(prevLayout, nextLayout) {
+    if (nextLayout === 'spiral') {
+      animateScalar(tableBlendRef, setTableBlend, tableAnimRef, 0, 220);
+      animateScalar(layoutBlendRef, setLayoutBlend, layoutAnimRef, 1, 260);
+      return;
+    }
+
+    if (nextLayout === 'table') {
+      const startTable = () => animateScalar(tableBlendRef, setTableBlend, tableAnimRef, 1, 260);
+      if (layoutBlendRef.current > 0.001) {
+        animateScalar(layoutBlendRef, setLayoutBlend, layoutAnimRef, 0, 220, startTable);
+      } else {
+        startTable();
+      }
+      return;
+    }
+
+    animateScalar(tableBlendRef, setTableBlend, tableAnimRef, 0, 260);
+    animateScalar(layoutBlendRef, setLayoutBlend, layoutAnimRef, 0, 260);
   }
 
   function animateOriginTo(nextOriginMs) {
@@ -401,6 +418,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
 
     const originMs = originAnimatedMsRef.current;
     const blend = layoutBlendRef.current;
+    const tableBlendLocal = tableBlendRef.current;
 
     const selectedSet = new Set(selectedChannelIds.length ? selectedChannelIds : channels.map((c) => c.id));
     const orderedSelected = channels.filter((c) => selectedSet.has(c.id)).map((c) => c.id);
@@ -411,6 +429,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
     gridGfx.clear();
 
     const blendIsZero = Math.abs(blend) < 0.001;
+    const tableBlendActive = tableBlendLocal > 0.001 && Math.abs(blend) < 0.001;
 
     const spiralBaseRadius = 30;
     const spiralOuterRadius = Math.max(80, Math.min(app.screen.width, app.screen.height) * 0.5 - 44);
@@ -420,6 +439,26 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
 
     const axesTimeZone = resolveDisplayTimeZoneForAxes();
     const originMidnightMs = getZonedMidnightUtcMs(originMs, axesTimeZone);
+
+    const tablePxPerDay = 900;
+    const tableChannelLaneGap = 10;
+    const tableRowPadY = 14;
+    const tableRowHeight = Math.max(56, channelCount * tableChannelLaneGap + tableRowPadY * 2);
+    const tableRows = pastDays + futureDays + 1;
+    const tableTotalHeight = tableRows * tableRowHeight;
+    const tableRowAreaTop = -tableTotalHeight * 0.5;
+    const tableLeft = -tablePxPerDay * 0.5;
+
+    function computeTablePoint(timeMs, channelIndex) {
+      const dayOffset = Math.floor((timeMs - originMidnightMs) / dayMs);
+      const r = futureDays - dayOffset;
+      const dayStartMs = originMidnightMs + dayOffset * dayMs;
+      const frac = (timeMs - dayStartMs) / dayMs;
+      const x = tableLeft + frac * tablePxPerDay;
+      const yRow = tableRowAreaTop + r * tableRowHeight;
+      const y = yRow + tableRowPadY + channelIndex * tableChannelLaneGap;
+      return { x, y };
+    }
 
     const laneY = 64;
     const laneGap = 42;
@@ -485,23 +524,29 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
       axes.lineTo(999999, baselineY);
     } else if (layout === 'table') {
       const pxPerDay = 900;
-      const leftGutter = 120;
-      const headerY = 42;
-      const rowTop = 70;
       const channelLaneGap = 10;
       const rowPadY = 14;
       const rowHeight = Math.max(56, channelCount * channelLaneGap + rowPadY * 2);
       const rows = pastDays + futureDays + 1;
 
+      const totalHeight = rows * rowHeight;
+      const rowAreaTop = -totalHeight * 0.5;
+      const rowAreaBottom = totalHeight * 0.5;
+      const headerY = rowAreaTop - 28;
+
+      const tableLeft = -pxPerDay * 0.5;
+      const tableRight = pxPerDay * 0.5;
+      const dateGutter = 140;
+
       const labels = [];
 
       const tableTop = headerY;
-      const tableBottom = rowTop + rows * rowHeight;
+      const tableBottom = rowAreaBottom;
 
       gridGfx.lineStyle(1, 0xffffff, 0.06);
 
       for (let h = 0; h <= 24; h += 1) {
-        const x = leftGutter + (h / 24) * pxPerDay;
+        const x = tableLeft + (h / 24) * pxPerDay;
         const isMajor = h % 6 === 0;
         gridGfx.lineStyle(1, 0xffffff, isMajor ? 0.08 : 0.04);
         gridGfx.moveTo(x, tableTop);
@@ -511,7 +556,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
           labels.push({
             text: String(h).padStart(2, '0'),
             x,
-            y: 28,
+            y: headerY - 12,
           });
         }
       }
@@ -520,20 +565,20 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
         const dayOffset = futureDays - r;
         const dayStartMs = originMidnightMs + dayOffset * dayMs;
 
-        const yStart = rowTop + r * rowHeight;
+        const yStart = rowAreaTop + r * rowHeight;
         const yEnd = yStart + rowHeight;
 
         gridGfx.lineStyle(1, 0xffffff, 0.08);
-        gridGfx.moveTo(leftGutter, yStart);
-        gridGfx.lineTo(leftGutter + pxPerDay, yStart);
+        gridGfx.moveTo(tableLeft, yStart);
+        gridGfx.lineTo(tableRight, yStart);
 
         gridGfx.lineStyle(1, 0xffffff, 0.04);
-        gridGfx.moveTo(leftGutter, yEnd);
-        gridGfx.lineTo(leftGutter + pxPerDay, yEnd);
+        gridGfx.moveTo(tableLeft, yEnd);
+        gridGfx.lineTo(tableRight, yEnd);
 
         labels.push({
           text: formatDateLabel(dayStartMs, axesTimeZone),
-          x: leftGutter - 60,
+          x: tableLeft - dateGutter * 0.5,
           y: yStart + rowHeight * 0.5,
         });
       }
@@ -660,13 +705,64 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
       const pad = thickness * 0.75 + 8;
 
       if (layout === 'table') {
-        const pxPerDay = 900;
-        const leftGutter = 120;
-        const rowTop = 70;
-        const channelLaneGap = 10;
-        const rowPadY = 14;
-        const rowHeight = Math.max(56, channelCount * channelLaneGap + rowPadY * 2);
-        const rows = pastDays + futureDays + 1;
+        if (tableBlendLocal < 0.999) {
+          // fall through to animated table drawing
+        } else {
+          const rows = tableRows;
+
+          let minX = Infinity;
+          let minY = Infinity;
+          let maxX = -Infinity;
+          let maxY = -Infinity;
+
+          g.lineStyle(thickness, color, alpha);
+
+          for (let r = 0; r < rows; r += 1) {
+            const dayOffset = futureDays - r;
+            const dayStartMs = originMidnightMs + dayOffset * dayMs;
+            const dayEndMs = dayStartMs + dayMs;
+
+            const segStart = Math.max(aMs, dayStartMs);
+            const segEnd = Math.min(bMs, dayEndMs);
+            if (!(segEnd > segStart)) continue;
+
+            const fracA = (segStart - dayStartMs) / dayMs;
+            const fracB = (segEnd - dayStartMs) / dayMs;
+            const xA = tableLeft + fracA * tablePxPerDay;
+            const xB = tableLeft + fracB * tablePxPerDay;
+
+            const yRow = tableRowAreaTop + r * tableRowHeight;
+            const yLane = yRow + tableRowPadY + idx * tableChannelLaneGap;
+
+            g.moveTo(xA, yLane);
+            g.lineTo(xB, yLane);
+
+            minX = Math.min(minX, xA, xB);
+            maxX = Math.max(maxX, xA, xB);
+            minY = Math.min(minY, yLane);
+            maxY = Math.max(maxY, yLane);
+          }
+
+          if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY) && g.__hitRect) {
+            g.__hitRect.x = minX - pad;
+            g.__hitRect.y = minY - pad;
+            g.__hitRect.width = Math.max(1, maxX - minX + pad * 2);
+            g.__hitRect.height = Math.max(1, maxY - minY + pad * 2);
+          }
+
+          continue;
+        }
+      }
+
+      if (tableBlendActive) {
+        const durationMs = Math.max(0, bMs - aMs);
+        const days = durationMs / dayMs;
+
+        let points = 2;
+        if (durationMs >= 30 * 60 * 1000) {
+          points = Math.ceil(days * 48) + 1;
+        }
+        points = Math.max(2, Math.min(160, points));
 
         let minX = Infinity;
         let minY = Infinity;
@@ -675,30 +771,22 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
 
         g.lineStyle(thickness, color, alpha);
 
-        for (let r = 0; r < rows; r += 1) {
-          const dayOffset = futureDays - r;
-          const dayStartMs = originMidnightMs + dayOffset * dayMs;
-          const dayEndMs = dayStartMs + dayMs;
+        for (let pi = 0; pi < points; pi += 1) {
+          const tt = points === 1 ? aMs : aMs + (durationMs * pi) / (points - 1);
 
-          const segStart = Math.max(aMs, dayStartMs);
-          const segEnd = Math.min(bMs, dayEndMs);
-          if (!(segEnd > segStart)) continue;
+          const linearP = computeLinearPoint(tt, idx, originMs);
+          const tableP = computeTablePoint(tt, idx);
 
-          const fracA = (segStart - dayStartMs) / dayMs;
-          const fracB = (segEnd - dayStartMs) / dayMs;
-          const xA = leftGutter + fracA * pxPerDay;
-          const xB = leftGutter + fracB * pxPerDay;
+          const x = linearP.x + (tableP.x - linearP.x) * tableBlendLocal;
+          const y = linearP.y + (tableP.y - linearP.y) * tableBlendLocal;
 
-          const yRow = rowTop + r * rowHeight;
-          const yLane = yRow + rowPadY + idx * channelLaneGap;
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x);
+          maxY = Math.max(maxY, y);
 
-          g.moveTo(xA, yLane);
-          g.lineTo(xB, yLane);
-
-          minX = Math.min(minX, xA, xB);
-          maxX = Math.max(maxX, xA, xB);
-          minY = Math.min(minY, yLane);
-          maxY = Math.max(maxY, yLane);
+          if (pi === 0) g.moveTo(x, y);
+          else g.lineTo(x, y);
         }
 
         if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY) && g.__hitRect) {
@@ -1106,7 +1194,9 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
   }, []);
 
   useEffect(() => {
-    animateLayoutTo(layout);
+    const prev = prevLayoutRef.current;
+    prevLayoutRef.current = layout;
+    animateLayoutTo(prev, layout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout]);
 
@@ -1321,7 +1411,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
 
   useEffect(() => {
     redrawTimeline();
-  }, [items, channels, selectedChannelIds, pastDays, futureDays, displayTimeZoneMode, customTimeZone, layoutBlend]);
+  }, [items, channels, selectedChannelIds, pastDays, futureDays, displayTimeZoneMode, customTimeZone, layoutBlend, tableBlend]);
 
   return (
     <Card>
@@ -1440,6 +1530,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
                 initialTimeZone={customTimeZone || userTimeZone || 'UTC'}
                 fieldName="__ignored"
                 recentsStorageKey="t24_recent_timeline_custom_time_zones_v1"
+                variant="compact"
                 onChange={(tz) => setCustomTimeZone(tz)}
               />
             ) : null}
