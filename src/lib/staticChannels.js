@@ -29,6 +29,7 @@ function normalizeChannel(raw, idx = 0) {
   const login = String(raw?.login || '').trim().toLowerCase();
   const displayName = String(raw?.displayName || '').trim();
   const timeZone = String(raw?.timeZone || '').trim();
+  const broadcasterId = String(raw?.broadcasterId || '').trim();
 
   const id = String(raw?.id || '').trim() || login || makeId();
 
@@ -36,6 +37,7 @@ function normalizeChannel(raw, idx = 0) {
     id,
     login,
     displayName: displayName || login,
+    broadcasterId: broadcasterId || null,
     colorHex: normalizeColorHex(raw?.colorHex),
     timeZone: timeZone || null,
     isEnabled: raw?.isEnabled === false ? false : true,

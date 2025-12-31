@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Flex, Text } from '@radix-ui/themes';
 
+import { createServerTimelineDataSource } from '@/lib/serverTimelineDataSource';
 import TimeZonePicker from '../settings/TimeZonePicker';
 
 function parseColorHexToInt(hex) {
@@ -82,7 +83,10 @@ function clampInt(v, min, max) {
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
-export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
+export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, dataSource }) {
+  const defaultDataSource = useMemo(() => createServerTimelineDataSource(), []);
+  const ds = dataSource || defaultDataSource;
+
   const containerRef = useRef(null);
   const appRef = useRef(null);
   const requestRenderRef = useRef(() => {});
@@ -941,11 +945,8 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
 
   async function loadConfig() {
     try {
-      const res = await fetch('/api/timeline/config', { cache: 'no-store' });
-      if (!res.ok) return null;
-      const json = await res.json();
-      if (!json?.ok) return null;
-      return json.timelineConfig || null;
+      if (!ds || typeof ds.loadConfig !== 'function') return null;
+      return await ds.loadConfig();
     } catch {
       return null;
     }
@@ -953,36 +954,23 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
 
   async function saveConfig(next) {
     try {
-      await fetch('/api/timeline/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(next),
-      });
+      if (!ds || typeof ds.saveConfig !== 'function') return;
+      await ds.saveConfig(next);
     } catch {
     }
   }
 
   async function loadTimelineData({ originMs, past, future, selectedIds }) {
-    const url = new URL('/api/timeline', window.location.origin);
-    url.searchParams.set('originMs', String(originMs));
-    url.searchParams.set('pastDays', String(past));
-    url.searchParams.set('futureDays', String(future));
-    if (selectedIds && selectedIds.length) {
-      url.searchParams.set('channelIds', selectedIds.join(','));
+    if (!ds || typeof ds.loadTimelineData !== 'function') {
+      throw new Error('No timeline data source configured');
     }
 
-    const res = await fetch(url.toString(), { cache: 'no-store' });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text || 'Failed to load timeline');
-    }
-
-    const json = await res.json();
-    if (!json?.ok) {
-      throw new Error(json?.error || 'Failed to load timeline');
-    }
-
-    return json;
+    return await ds.loadTimelineData({
+      originMs,
+      pastDays: past,
+      futureDays: future,
+      channelIds: selectedIds,
+    });
   }
 
   function applyTimelineJson(json) {
@@ -1360,14 +1348,13 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
     if (!isAdmin) return;
     try {
       setStatus('Reordering…');
-      const res = await fetch('/api/twitch/channels/reorder', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channelId, direction }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Reorder failed: ${res.status} ${text}`);
+      if (ds && typeof ds.reorderChannel === 'function') {
+        const res = await ds.reorderChannel({ channelId, direction });
+        if (res && typeof res === 'object' && res.ok === false) {
+          throw new Error(res.error || 'Reorder failed');
+        }
+      } else {
+        throw new Error('Reorder not supported');
       }
 
       const json = await loadTimelineData({

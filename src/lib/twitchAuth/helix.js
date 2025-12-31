@@ -9,6 +9,12 @@ export async function apiGet(path, query = {}) {
 
   const url = new URL(`${API_BASE}${path}`);
   Object.entries(query).forEach(([k, v]) => {
+    if (Array.isArray(v)) {
+      v.forEach((vv) => {
+        if (vv !== undefined && vv !== null && vv !== '') url.searchParams.append(k, String(vv));
+      });
+      return;
+    }
     if (v !== undefined && v !== null && v !== '') url.searchParams.append(k, String(v));
   });
 
