@@ -112,6 +112,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
 
   const [channels, setChannels] = useState([]);
   const [selectedChannelIds, setSelectedChannelIds] = useState([]);
+  const [previewChannelId, setPreviewChannelId] = useState(null);
   const [pastDays, setPastDays] = useState(10);
   const [futureDays, setFutureDays] = useState(5);
   const [displayTimeZoneMode, setDisplayTimeZoneMode] = useState('user');
@@ -425,6 +426,9 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     const tableBlendLocal = tableBlendRef.current;
 
     const selectedSet = new Set(selectedChannelIds.length ? selectedChannelIds : channels.map((c) => c.id));
+    const previewActive =
+      previewChannelId && selectedChannelIds.length && !selectedSet.has(previewChannelId) ? previewChannelId : null;
+    if (previewActive) selectedSet.add(previewActive);
     const orderedSelected = channels.filter((c) => selectedSet.has(c.id)).map((c) => c.id);
     const channelOrder = new Map(orderedSelected.map((id, idx) => [id, idx]));
     const channelCount = orderedSelected.length;
@@ -1274,13 +1278,21 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
 
     let cancelled = false;
 
+    const effectiveSelectedIds = (() => {
+      if (!selectedChannelIds.length) return selectedChannelIds;
+      const id = String(previewChannelId || '').trim();
+      if (!id) return selectedChannelIds;
+      if (selectedChannelIds.includes(id)) return selectedChannelIds;
+      return [...selectedChannelIds, id];
+    })();
+
     (async () => {
       try {
         const json = await loadTimelineData({
           originMs: originTargetMs,
           past: pastDays,
           future: futureDays,
-          selectedIds: selectedChannelIds,
+          selectedIds: effectiveSelectedIds,
         });
         if (cancelled) return;
 
@@ -1342,7 +1354,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     return () => {
       cancelled = true;
     };
-  }, [originTargetMs, pastDays, futureDays, selectedChannelIds]);
+  }, [originTargetMs, pastDays, futureDays, selectedChannelIds, previewChannelId]);
 
   async function reorderChannel(channelId, direction) {
     if (!isAdmin) return;
@@ -1452,8 +1464,23 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
               {channels.map((c, idx) => {
                 const checked = selectedChannelIds.length ? selectedChannelIds.includes(c.id) : true;
                 const hex = colorCssByChannelId.get(c.id) || '#94a3b8';
+                const previewing = !checked && previewChannelId === c.id;
                 return (
-                  <Flex key={c.id} gap="2" align="center" wrap="wrap">
+                  <Flex
+                    key={c.id}
+                    gap="2"
+                    align="center"
+                    wrap="wrap"
+                    onMouseEnter={() => {
+                      if (checked) return;
+                      setPreviewChannelId(c.id);
+                    }}
+                    onMouseLeave={() => {
+                      if (checked) return;
+                      setPreviewChannelId((prev) => (prev === c.id ? null : prev));
+                    }}
+                    style={previewing ? { outline: '1px solid rgba(255,255,255,0.18)', borderRadius: 10, padding: 6 } : null}
+                  >
                     <label style={{ display: 'flex', gap: 10, alignItems: 'center', flex: 1, minWidth: 180 }}>
                       <input
                         type="checkbox"

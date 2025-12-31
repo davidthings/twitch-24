@@ -43,6 +43,23 @@ function safeParseJson(text) {
   }
 }
 
+function parseTwitchDurationToMs(s) {
+  const text = String(s || '').trim();
+  if (!text) return 0;
+  const m = text.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/);
+  if (!m) return 0;
+  const h = Number(m[1] || 0);
+  const min = Number(m[2] || 0);
+  const sec = Number(m[3] || 0);
+  if (![h, min, sec].every((x) => Number.isFinite(x) && x >= 0)) return 0;
+  return (h * 60 * 60 + min * 60 + sec) * 1000;
+}
+
+function asFiniteNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 const DISCOVERY_CACHE_KEY = 't24_channel_discovery_cache_v1';
 
 function loadDiscoveryCache(cacheKey) {
@@ -84,6 +101,12 @@ export default function StaticChannelsPage() {
   const [selectedGame, setSelectedGame] = useState(null);
   const [startAt, setStartAt] = useState('');
   const [endAt, setEndAt] = useState('');
+  const [endStartAt, setEndStartAt] = useState('');
+  const [endEndAt, setEndEndAt] = useState('');
+  const [minViewCount, setMinViewCount] = useState('1000');
+  const [hideExisting, setHideExisting] = useState(true);
+  const [sortBy, setSortBy] = useState('maxViewCount');
+  const [sortDir, setSortDir] = useState('desc');
   const [discoverStatus, setDiscoverStatus] = useState('');
   const [discoverLoading, setDiscoverLoading] = useState(false);
   const [discoverResults, setDiscoverResults] = useState([]);
@@ -108,6 +131,36 @@ export default function StaticChannelsPage() {
   }, [channels]);
 
   const enabledCount = useMemo(() => channels.filter((c) => c.isEnabled).length, [channels]);
+
+  const visibleDiscoverResults = useMemo(() => {
+    const minViews = asFiniteNumber(minViewCount, 0);
+    const rows = Array.isArray(discoverResults) ? discoverResults : [];
+
+    const filtered = rows.filter((r) => {
+      if (!r) return false;
+      const exists = channels.some((c) => c.login === r.login || (c.broadcasterId && c.broadcasterId === r.userId));
+      if (hideExisting && exists) return false;
+      if (minViews > 0 && asFiniteNumber(r.maxViewCount, 0) < minViews) return false;
+      return true;
+    });
+
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const sorted = [...filtered].sort((a, b) => {
+      const ka = sortBy;
+      if (ka === 'channel') {
+        const aa = String(a.displayName || a.login || '').toLowerCase();
+        const bb = String(b.displayName || b.login || '').toLowerCase();
+        return aa.localeCompare(bb) * dir;
+      }
+      if (ka === 'latestVodAtMs') return (asFiniteNumber(a.latestVodAtMs, 0) - asFiniteNumber(b.latestVodAtMs, 0)) * dir;
+      if (ka === 'latestVodEndAtMs') return (asFiniteNumber(a.latestVodEndAtMs, 0) - asFiniteNumber(b.latestVodEndAtMs, 0)) * dir;
+      if (ka === 'vodCount') return (asFiniteNumber(a.vodCount, 0) - asFiniteNumber(b.vodCount, 0)) * dir;
+      if (ka === 'maxViewCount') return (asFiniteNumber(a.maxViewCount, 0) - asFiniteNumber(b.maxViewCount, 0)) * dir;
+      return (asFiniteNumber(a.maxViewCount, 0) - asFiniteNumber(b.maxViewCount, 0)) * dir;
+    });
+
+    return sorted;
+  }, [channels, discoverResults, hideExisting, minViewCount, sortBy, sortDir]);
 
   function persist(next) {
     setChannels(next);
@@ -171,6 +224,9 @@ export default function StaticChannelsPage() {
     const startMs = startAt ? new Date(startAt).getTime() : NaN;
     const endMs = endAt ? new Date(endAt).getTime() : NaN;
 
+    const endStartMs = endStartAt ? new Date(endStartAt).getTime() : NaN;
+    const endEndMs = endEndAt ? new Date(endEndAt).getTime() : NaN;
+
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
       setDiscoverStatus('Provide a valid start and end time');
       return;
@@ -180,7 +236,24 @@ export default function StaticChannelsPage() {
       return;
     }
 
-    const cacheKey = JSON.stringify({ gameId, startMs, endMs, language: 'en', type: 'archive' });
+    if ((endStartAt || endEndAt) && (!Number.isFinite(endStartMs) || !Number.isFinite(endEndMs))) {
+      setDiscoverStatus('Provide a valid VOD end-time start and end (or leave both blank)');
+      return;
+    }
+    if (Number.isFinite(endStartMs) && Number.isFinite(endEndMs) && endEndMs < endStartMs) {
+      setDiscoverStatus('VOD end-time end must be after VOD end-time start');
+      return;
+    }
+
+    const cacheKey = JSON.stringify({
+      gameId,
+      startMs,
+      endMs,
+      endStartMs: Number.isFinite(endStartMs) ? endStartMs : null,
+      endEndMs: Number.isFinite(endEndMs) ? endEndMs : null,
+      language: 'en',
+      type: 'archive',
+    });
     const cached = loadDiscoveryCache(cacheKey);
     if (cached && Array.isArray(cached)) {
       setDiscoverResults(cached);
@@ -212,6 +285,9 @@ export default function StaticChannelsPage() {
           const createdAtMs = createdAtIso ? new Date(createdAtIso).getTime() : NaN;
           if (!Number.isFinite(createdAtMs)) continue;
 
+          const durationMs = parseTwitchDurationToMs(v?.duration);
+          const endAtMs = createdAtMs + durationMs;
+
           if (createdAtMs < startMs) {
             reachedPastStart = true;
             break;
@@ -220,9 +296,14 @@ export default function StaticChannelsPage() {
             continue;
           }
 
+          if (Number.isFinite(endStartMs) && Number.isFinite(endEndMs)) {
+            if (endAtMs < endStartMs || endAtMs > endEndMs) continue;
+          }
+
           const userId = String(v?.user_id || '').trim();
           const login = normalizeLogin(v?.user_login);
           const displayName = String(v?.user_name || '').trim();
+          const viewCount = asFiniteNumber(v?.view_count, 0);
           if (!userId || !login) continue;
 
           const prev = channelByUserId.get(userId) || {
@@ -230,13 +311,28 @@ export default function StaticChannelsPage() {
             login,
             displayName: displayName || login,
             latestVodAtMs: createdAtMs,
+            latestVodEndAtMs: endAtMs,
             vodCount: 0,
+            totalViewCount: 0,
+            maxViewCount: 0,
             sampleVodUrl: String(v?.url || '').trim() || null,
             sampleVodTitle: String(v?.title || '').trim() || null,
+            sampleVodViewCount: viewCount,
           };
 
           prev.vodCount += 1;
-          prev.latestVodAtMs = Math.max(prev.latestVodAtMs || 0, createdAtMs);
+          prev.totalViewCount += viewCount;
+          if (viewCount > (prev.maxViewCount || 0)) {
+            prev.maxViewCount = viewCount;
+            prev.sampleVodUrl = String(v?.url || '').trim() || prev.sampleVodUrl;
+            prev.sampleVodTitle = String(v?.title || '').trim() || prev.sampleVodTitle;
+            prev.sampleVodViewCount = viewCount;
+          }
+
+          if (!prev.latestVodAtMs || createdAtMs > prev.latestVodAtMs) {
+            prev.latestVodAtMs = createdAtMs;
+            prev.latestVodEndAtMs = endAtMs;
+          }
           if (!prev.sampleVodUrl) prev.sampleVodUrl = String(v?.url || '').trim() || null;
           if (!prev.sampleVodTitle) prev.sampleVodTitle = String(v?.title || '').trim() || null;
           if (!prev.displayName || prev.displayName === prev.login) {
@@ -253,7 +349,7 @@ export default function StaticChannelsPage() {
       }
 
       const results = Array.from(channelByUserId.values())
-        .sort((a, b) => (b.latestVodAtMs || 0) - (a.latestVodAtMs || 0))
+        .sort((a, b) => (asFiniteNumber(b.maxViewCount, 0) - asFiniteNumber(a.maxViewCount, 0)) || (asFiniteNumber(b.latestVodAtMs, 0) - asFiniteNumber(a.latestVodAtMs, 0)))
         .slice(0, 200);
 
       setDiscoverResults(results);
@@ -280,6 +376,34 @@ export default function StaticChannelsPage() {
     const next = [...channels, makeNewChannel({ login, displayName, broadcasterId })].map((c, i) => ({ ...c, sortOrder: i }));
     persist(next);
     setStatus(`Added ${displayName || login}`);
+  }
+
+  function addVisibleDiscoveredChannels() {
+    const toAdd = visibleDiscoverResults.filter((r) => {
+      if (!r) return false;
+      const login = normalizeLogin(r.login);
+      const broadcasterId = String(r.userId || '').trim();
+      return !channels.some((c) => c.login === login || c.id === login || (broadcasterId && c.broadcasterId === broadcasterId));
+    });
+
+    if (toAdd.length === 0) {
+      setStatus('No new channels to add (based on current filters)');
+      return;
+    }
+
+    const appended = toAdd.map((r) => makeNewChannel({ login: r.login, displayName: r.displayName, broadcasterId: r.userId }));
+    const next = [...channels, ...appended].map((c, i) => ({ ...c, sortOrder: i }));
+    persist(next);
+    setStatus(`Added ${appended.length} channel(s) from visible results`);
+  }
+
+  function toggleSort(nextKey) {
+    if (sortBy === nextKey) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+      return;
+    }
+    setSortBy(nextKey);
+    setSortDir('desc');
   }
 
   function onReauth() {
@@ -475,6 +599,77 @@ export default function StaticChannelsPage() {
             </Button>
           </Flex>
 
+          <Flex gap="3" wrap="wrap" align="end">
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                VOD end time (optional)
+              </Text>
+              <Flex gap="2" wrap="wrap">
+                <input
+                  type="datetime-local"
+                  value={endStartAt}
+                  onChange={(e) => setEndStartAt(e.target.value)}
+                  placeholder="End start"
+                  style={{
+                    width: 240,
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    border: '1px solid rgba(255,255,255,0.18)',
+                    background: 'rgba(255,255,255,0.06)',
+                    color: 'inherit',
+                  }}
+                />
+                <input
+                  type="datetime-local"
+                  value={endEndAt}
+                  onChange={(e) => setEndEndAt(e.target.value)}
+                  placeholder="End end"
+                  style={{
+                    width: 240,
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    border: '1px solid rgba(255,255,255,0.18)',
+                    background: 'rgba(255,255,255,0.06)',
+                    color: 'inherit',
+                  }}
+                />
+              </Flex>
+            </label>
+          </Flex>
+
+          <Flex gap="3" wrap="wrap" align="end">
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                Min VOD views
+              </Text>
+              <input
+                inputMode="numeric"
+                value={minViewCount}
+                onChange={(e) => setMinViewCount(e.target.value)}
+                placeholder="1000"
+                style={{
+                  width: 180,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: 'inherit',
+                }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <input type="checkbox" checked={hideExisting} onChange={(e) => setHideExisting(e.target.checked)} />
+              <Text size="2" color="gray">
+                Hide already-added
+              </Text>
+            </label>
+
+            <Button type="button" variant="soft" onClick={addVisibleDiscoveredChannels} disabled={!visibleDiscoverResults.length}>
+              Add visible ({visibleDiscoverResults.length})
+            </Button>
+          </Flex>
+
           {discoverStatus ? (
             <Text size="2" color="gray">
               {discoverStatus}
@@ -486,15 +681,27 @@ export default function StaticChannelsPage() {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    <th style={{ textAlign: 'left', padding: '8px 6px' }}>Channel</th>
-                    <th style={{ textAlign: 'left', padding: '8px 6px' }}>Latest VOD</th>
-                    <th style={{ textAlign: 'left', padding: '8px 6px' }}>VODs matched</th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', cursor: 'pointer' }} onClick={() => toggleSort('channel')}>
+                      Channel
+                    </th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', cursor: 'pointer' }} onClick={() => toggleSort('latestVodAtMs')}>
+                      Latest VOD start
+                    </th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', cursor: 'pointer' }} onClick={() => toggleSort('latestVodEndAtMs')}>
+                      Latest VOD end
+                    </th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', cursor: 'pointer' }} onClick={() => toggleSort('maxViewCount')}>
+                      Max views
+                    </th>
+                    <th style={{ textAlign: 'left', padding: '8px 6px', cursor: 'pointer' }} onClick={() => toggleSort('vodCount')}>
+                      VODs matched
+                    </th>
                     <th style={{ textAlign: 'left', padding: '8px 6px' }}>Example</th>
                     <th style={{ textAlign: 'left', padding: '8px 6px' }}>Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {discoverResults.map((r) => {
+                  {visibleDiscoverResults.map((r) => {
                     const exists = channels.some((c) => c.login === r.login || (c.broadcasterId && c.broadcasterId === r.userId));
                     return (
                       <tr key={r.userId}>
@@ -506,6 +713,16 @@ export default function StaticChannelsPage() {
                         <td style={{ padding: '8px 6px' }}>
                           <Text size="2" color="gray">
                             {r.latestVodAtMs ? new Date(r.latestVodAtMs).toISOString() : '-'}
+                          </Text>
+                        </td>
+                        <td style={{ padding: '8px 6px' }}>
+                          <Text size="2" color="gray">
+                            {r.latestVodEndAtMs ? new Date(r.latestVodEndAtMs).toISOString() : '-'}
+                          </Text>
+                        </td>
+                        <td style={{ padding: '8px 6px' }}>
+                          <Text size="2" color="gray">
+                            {asFiniteNumber(r.maxViewCount, 0).toLocaleString()}
                           </Text>
                         </td>
                         <td style={{ padding: '8px 6px' }}>
