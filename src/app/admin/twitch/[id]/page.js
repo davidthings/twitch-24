@@ -29,12 +29,22 @@ export default async function AdminTwitchChannelPage({ params }) {
       login: true,
       broadcasterId: true,
       displayName: true,
+      colorHex: true,
       timeZone: true,
       isEnabled: true,
       pollSchedule: true,
       pollStreams: true,
+      pollVideos: true,
       lastScheduleSyncAt: true,
       lastStreamSyncAt: true,
+      lastVideoSyncAt: true,
+      _count: {
+        select: {
+          scheduleSegments: true,
+          streamSnapshots: true,
+          videos: true,
+        },
+      },
       scheduleSegments: {
         orderBy: [{ startTime: 'asc' }],
         take: 30,
@@ -70,6 +80,44 @@ export default async function AdminTwitchChannelPage({ params }) {
     redirect(`/admin/twitch/${channelId}`);
   }
 
+  async function toggleChannelField(formData) {
+    'use server';
+
+    await requireAdmin();
+
+    const field = String(formData.get('field') || '');
+    if (field !== 'isEnabled' && field !== 'pollSchedule' && field !== 'pollStreams' && field !== 'pollVideos') return;
+
+    const current = await prisma.twitchChannel.findUnique({
+      where: { id: channelId },
+      select: { id: true, isEnabled: true, pollSchedule: true, pollStreams: true, pollVideos: true },
+    });
+    if (!current) return;
+
+    await prisma.twitchChannel.update({
+      where: { id: channelId },
+      data: { [field]: !current[field] },
+    });
+
+    redirect(`/admin/twitch/${channelId}`);
+  }
+
+  async function setChannelColor(formData) {
+    'use server';
+
+    await requireAdmin();
+
+    const raw = String(formData.get('colorHex') || '').trim();
+    const colorHex = raw.match(/^#[0-9a-fA-F]{6}$/) ? raw.toLowerCase() : null;
+
+    await prisma.twitchChannel.update({
+      where: { id: channelId },
+      data: { colorHex },
+    });
+
+    redirect(`/admin/twitch/${channelId}`);
+  }
+
   async function clearChannelTimeZone() {
     'use server';
 
@@ -96,6 +144,149 @@ export default async function AdminTwitchChannelPage({ params }) {
         <Text size="2">
           <Link href="/admin/twitch">Back to Twitch admin</Link>
         </Text>
+      </Flex>
+
+      <Flex direction="column" gap="3">
+        <Heading size="3">Operational settings</Heading>
+
+        <Flex gap="2" align="center" wrap="wrap">
+          <Text size="2" color="gray">
+            Enabled:
+          </Text>
+          <Text size="2">{channel.isEnabled ? 'yes' : 'no'}</Text>
+          <form action={toggleChannelField}>
+            <input type="hidden" name="field" value="isEnabled" />
+            <Button variant="soft" type="submit">
+              {channel.isEnabled ? 'Disable' : 'Enable'}
+            </Button>
+          </form>
+        </Flex>
+
+        <Flex gap="2" align="center" wrap="wrap">
+          <Text size="2" color="gray">
+            Poll schedule:
+          </Text>
+          <Text size="2">{channel.pollSchedule ? 'on' : 'off'}</Text>
+          <form action={toggleChannelField}>
+            <input type="hidden" name="field" value="pollSchedule" />
+            <Button variant="soft" type="submit">
+              Toggle
+            </Button>
+          </form>
+        </Flex>
+
+        <Flex gap="2" align="center" wrap="wrap">
+          <Text size="2" color="gray">
+            Poll streams:
+          </Text>
+          <Text size="2">{channel.pollStreams ? 'on' : 'off'}</Text>
+          <form action={toggleChannelField}>
+            <input type="hidden" name="field" value="pollStreams" />
+            <Button variant="soft" type="submit">
+              Toggle
+            </Button>
+          </form>
+        </Flex>
+
+        <Flex gap="2" align="center" wrap="wrap">
+          <Text size="2" color="gray">
+            Poll videos:
+          </Text>
+          <Text size="2">{channel.pollVideos ? 'on' : 'off'}</Text>
+          <form action={toggleChannelField}>
+            <input type="hidden" name="field" value="pollVideos" />
+            <Button variant="soft" type="submit">
+              Toggle
+            </Button>
+          </form>
+        </Flex>
+
+        <Flex gap="6" wrap="wrap">
+          <Flex direction="column" gap="1">
+            <Text size="2" color="gray">
+              Schedule segs
+            </Text>
+            <Text size="2">{channel._count.scheduleSegments}</Text>
+          </Flex>
+          <Flex direction="column" gap="1">
+            <Text size="2" color="gray">
+              Stream snaps
+            </Text>
+            <Text size="2">{channel._count.streamSnapshots}</Text>
+          </Flex>
+          <Flex direction="column" gap="1">
+            <Text size="2" color="gray">
+              Videos
+            </Text>
+            <Text size="2">{channel._count.videos}</Text>
+          </Flex>
+        </Flex>
+
+        <Flex gap="6" wrap="wrap">
+          <Flex direction="column" gap="1">
+            <Text size="2" color="gray">
+              Last schedule
+            </Text>
+            <Text size="2">{channel.lastScheduleSyncAt ? formatInTimeZone(channel.lastScheduleSyncAt, viewerTz) : '-'}</Text>
+          </Flex>
+          <Flex direction="column" gap="1">
+            <Text size="2" color="gray">
+              Last stream
+            </Text>
+            <Text size="2">{channel.lastStreamSyncAt ? formatInTimeZone(channel.lastStreamSyncAt, viewerTz) : '-'}</Text>
+          </Flex>
+          <Flex direction="column" gap="1">
+            <Text size="2" color="gray">
+              Last video
+            </Text>
+            <Text size="2">{channel.lastVideoSyncAt ? formatInTimeZone(channel.lastVideoSyncAt, viewerTz) : '-'}</Text>
+          </Flex>
+        </Flex>
+      </Flex>
+
+      <Flex direction="column" gap="3">
+        <Heading size="3">Channel color</Heading>
+        <Text size="2" color="gray">
+          Used for timeline rendering.
+        </Text>
+
+        <Flex gap="2" align="center" wrap="wrap">
+          <Text size="2" color="gray">
+            Current:
+          </Text>
+          <Text size="2" style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
+            {channel.colorHex || '-'}
+          </Text>
+          {channel.colorHex ? (
+            <span
+              style={{
+                width: 14,
+                height: 14,
+                borderRadius: 4,
+                background: channel.colorHex,
+                border: '1px solid rgba(255,255,255,0.25)',
+                display: 'inline-block',
+              }}
+            />
+          ) : null}
+        </Flex>
+
+        <form action={setChannelColor}>
+          <Flex gap="2" align="end" wrap="wrap">
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                Color
+              </Text>
+              <input
+                name="colorHex"
+                type="color"
+                defaultValue={channel.colorHex || '#94a3b8'}
+                style={{ width: 64, height: 40, padding: 0, border: 'none', background: 'transparent' }}
+              />
+            </label>
+            <Button type="submit">Save</Button>
+          </Flex>
+        </form>
       </Flex>
 
       <Flex direction="column" gap="3">

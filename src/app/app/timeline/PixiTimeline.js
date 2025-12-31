@@ -3,6 +3,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Flex, Text } from '@radix-ui/themes';
 
+import TimeZonePicker from '../settings/TimeZonePicker';
+
+function parseColorHexToInt(hex) {
+  const s = String(hex || '').trim();
+  const m = s.match(/^#([0-9a-fA-F]{6})$/);
+  if (!m) return null;
+  const n = Number.parseInt(m[1], 16);
+  return Number.isFinite(n) ? n : null;
+}
+
+function hashStringToIndex(s, mod) {
+  const str = String(s || '');
+  let h = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    h = (h * 31 + str.charCodeAt(i)) >>> 0;
+  }
+
+  return mod > 0 ? h % mod : 0;
+}
+
 function easeInOutCubic(t) {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
@@ -62,13 +82,20 @@ function clampInt(v, min, max) {
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
-export default function PixiTimeline({ userTimeZone }) {
+export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin }) {
   const containerRef = useRef(null);
   const appRef = useRef(null);
   const requestRenderRef = useRef(() => {});
   const renderNowRef = useRef(() => {});
 
+  const layoutAnimRef = useRef(0);
+  const originAnimRef = useRef(0);
+
   const worldRef = useRef(null);
+  const gridGfxRef = useRef(null);
+  const gridLabelsLayerRef = useRef(null);
+  const gridLabelTextsRef = useRef([]);
+  const pixiTextCtorRef = useRef(null);
   const axesGfxRef = useRef(null);
   const eventsLayerRef = useRef(null);
   const eventGfxRef = useRef([]);
@@ -80,10 +107,13 @@ export default function PixiTimeline({ userTimeZone }) {
   const [selectedChannelIds, setSelectedChannelIds] = useState([]);
   const [pastDays, setPastDays] = useState(10);
   const [futureDays, setFutureDays] = useState(5);
+  const [displayTimeZoneMode, setDisplayTimeZoneMode] = useState('user');
+  const [customTimeZone, setCustomTimeZone] = useState(userTimeZone || 'UTC');
 
-  const [originTargetMs, setOriginTargetMs] = useState(() => Date.now());
-  const originAnimatedMsRef = useRef(originTargetMs);
-  const originTargetMsRef = useRef(originTargetMs);
+  const initialOriginMs = typeof initialNowMs === 'number' && Number.isFinite(initialNowMs) ? initialNowMs : Date.now();
+  const [originTargetMs, setOriginTargetMs] = useState(() => initialOriginMs);
+  const originAnimatedMsRef = useRef(initialOriginMs);
+  const originTargetMsRef = useRef(initialOriginMs);
 
   const [layoutBlend, setLayoutBlend] = useState(0);
   const layoutBlendRef = useRef(0);
@@ -108,6 +138,109 @@ export default function PixiTimeline({ userTimeZone }) {
     }, 80);
   }
 
+  function resolveDisplayTimeZoneForItem(item) {
+    if (displayTimeZoneMode === 'utc') return 'UTC';
+    if (displayTimeZoneMode === 'custom') return customTimeZone || userTimeZone || 'UTC';
+    if (displayTimeZoneMode === 'channel') return item?.channelTimeZone || userTimeZone || 'UTC';
+    return userTimeZone || 'UTC';
+  }
+
+  function resolveDisplayTimeZoneForAxes() {
+    if (displayTimeZoneMode === 'utc') return 'UTC';
+    if (displayTimeZoneMode === 'custom') return customTimeZone || userTimeZone || 'UTC';
+    return userTimeZone || 'UTC';
+  }
+
+  function formatDateLabel(dateMs, timeZone) {
+    const d = new Date(dateMs);
+    if (Number.isNaN(d.getTime())) return '';
+    try {
+      return new Intl.DateTimeFormat(undefined, { timeZone, month: 'short', day: '2-digit' }).format(d);
+    } catch {
+      return new Intl.DateTimeFormat(undefined, { timeZone: 'UTC', month: 'short', day: '2-digit' }).format(d);
+    }
+  }
+
+  function getZonedParts(dateMs, timeZone) {
+    const d = new Date(dateMs);
+    const fmt = new Intl.DateTimeFormat(undefined, {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+
+    const parts = fmt.formatToParts(d);
+    const get = (type) => parts.find((p) => p.type === type)?.value;
+
+    const year = Number(get('year') || 0);
+    const month = Number(get('month') || 1);
+    const day = Number(get('day') || 1);
+    const hour = Number(get('hour') || 0);
+    const minute = Number(get('minute') || 0);
+    const second = Number(get('second') || 0);
+
+    return {
+      year: Number.isNaN(year) ? 0 : year,
+      month: Number.isNaN(month) ? 1 : month,
+      day: Number.isNaN(day) ? 1 : day,
+      hour: Number.isNaN(hour) ? 0 : hour,
+      minute: Number.isNaN(minute) ? 0 : minute,
+      second: Number.isNaN(second) ? 0 : second,
+    };
+  }
+
+  function getZonedMidnightUtcMs(dateMs, timeZone) {
+    const p = getZonedParts(dateMs, timeZone);
+    let guess = Date.UTC(p.year, p.month - 1, p.day, 0, 0, 0);
+
+    for (let i = 0; i < 4; i += 1) {
+      const gp = getZonedParts(guess, timeZone);
+      const deltaMinutes = gp.hour * 60 + gp.minute;
+      const dayDelta = Date.UTC(p.year, p.month - 1, p.day) - Date.UTC(gp.year, gp.month - 1, gp.day);
+      guess = guess + dayDelta - deltaMinutes * 60 * 1000;
+    }
+
+    return guess;
+  }
+
+  function setGridLabels(labels) {
+    const layer = gridLabelsLayerRef.current;
+    const TextCtor = pixiTextCtorRef.current;
+    if (!layer || !TextCtor) return;
+
+    const pool = gridLabelTextsRef.current;
+
+    for (let i = pool.length; i < labels.length; i += 1) {
+      const t = new TextCtor('', {
+        fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+        fontSize: 12,
+        fill: 0xffffff,
+        align: 'center',
+      });
+      t.alpha = 0.8;
+      pool.push(t);
+      layer.addChild(t);
+    }
+
+    for (let i = 0; i < labels.length; i += 1) {
+      const l = labels[i];
+      const t = pool[i];
+      t.text = l.text;
+      t.position.set(l.x, l.y);
+      t.anchor?.set?.(0.5, 0.5);
+      t.visible = true;
+    }
+
+    for (let i = labels.length; i < pool.length; i += 1) {
+      pool[i].visible = false;
+    }
+  }
+
   function resetView() {
     const app = appRef.current;
     const world = worldRef.current;
@@ -116,6 +249,72 @@ export default function PixiTimeline({ userTimeZone }) {
     world.scale.set(1);
     world.position.set(app.screen.width * 0.5, app.screen.height * 0.5);
     requestRenderRef.current();
+  }
+
+  function animateLayoutTo(nextLayout) {
+    const target = nextLayout === 'spiral' ? 1 : 0;
+    const start = layoutBlendRef.current;
+    if (Math.abs(target - start) < 0.001) {
+      layoutBlendRef.current = target;
+      setLayoutBlend(target);
+      redrawTimeline();
+      requestRenderRef.current();
+      return;
+    }
+
+    const myId = (layoutAnimRef.current || 0) + 1;
+    layoutAnimRef.current = myId;
+
+    const startT = performance.now();
+    const durationMs = 260;
+
+    const step = (now) => {
+      if (layoutAnimRef.current !== myId) return;
+      const t = Math.max(0, Math.min(1, (now - startT) / durationMs));
+      const eased = easeInOutCubic(t);
+      const v = start + (target - start) * eased;
+      layoutBlendRef.current = v;
+      setLayoutBlend(v);
+      redrawTimeline();
+      requestRenderRef.current();
+      if (t < 1) requestAnimationFrame(step);
+    };
+
+    requestAnimationFrame(step);
+  }
+
+  function animateOriginTo(nextOriginMs) {
+    const target = typeof nextOriginMs === 'number' && Number.isFinite(nextOriginMs) ? nextOriginMs : Date.now();
+
+    setOriginTargetMs(target);
+    originTargetMsRef.current = target;
+
+    const start = originAnimatedMsRef.current;
+    if (!Number.isFinite(start) || Math.abs(target - start) < 1) {
+      originAnimatedMsRef.current = target;
+      redrawTimeline();
+      requestRenderRef.current();
+      return;
+    }
+
+    const myId = (originAnimRef.current || 0) + 1;
+    originAnimRef.current = myId;
+
+    const startT = performance.now();
+    const durationMs = 320;
+
+    const step = (now) => {
+      if (originAnimRef.current !== myId) return;
+      const t = Math.max(0, Math.min(1, (now - startT) / durationMs));
+      const eased = easeInOutCubic(t);
+      const v = start + (target - start) * eased;
+      originAnimatedMsRef.current = v;
+      redrawTimeline();
+      requestRenderRef.current();
+      if (t < 1) requestAnimationFrame(step);
+    };
+
+    requestAnimationFrame(step);
   }
 
   const palette = useMemo(
@@ -127,10 +326,32 @@ export default function PixiTimeline({ userTimeZone }) {
     const m = new Map();
     for (let i = 0; i < channels.length; i += 1) {
       const c = channels[i];
-      m.set(c.id, palette[i % palette.length]);
+      const stored = parseColorHexToInt(c.colorHex);
+      if (stored !== null) {
+        m.set(c.id, stored);
+      } else {
+        const idx = hashStringToIndex(c.id || c.login, palette.length);
+        m.set(c.id, palette[idx]);
+      }
     }
     return m;
   }, [channels, palette]);
+
+  const colorCssByChannelId = useMemo(() => {
+    const m = new Map();
+    for (let i = 0; i < channels.length; i += 1) {
+      const c = channels[i];
+      const stored = String(c.colorHex || '').trim();
+      if (stored.match(/^#[0-9a-fA-F]{6}$/)) {
+        m.set(c.id, stored);
+      } else {
+        const n = colorByChannelId.get(c.id);
+        const hex = typeof n === 'number' ? `#${n.toString(16).padStart(6, '0')}` : '#94a3b8';
+        m.set(c.id, hex);
+      }
+    }
+    return m;
+  }, [channels, colorByChannelId]);
 
   function computeLinearPoint(timeMs, channelIndex, originMs) {
     const pxPerDay = 180;
@@ -154,7 +375,7 @@ export default function PixiTimeline({ userTimeZone }) {
     const spiralDay = loop + dayFraction;
     const r = rOrigin - approx * dayStep + (channelIndex - (channelCount - 1) * 0.5) * 6;
 
-    const theta = -spiralDay * Math.PI * 2 - Math.PI / 2;
+    const theta = spiralDay * Math.PI * 2 - Math.PI / 2;
 
     const x = r * Math.cos(theta);
     const y = r * Math.sin(theta);
@@ -165,17 +386,20 @@ export default function PixiTimeline({ userTimeZone }) {
     const app = appRef.current;
     const axes = axesGfxRef.current;
     const eventsLayer = eventsLayerRef.current;
+    const gridGfx = gridGfxRef.current;
 
-    if (!app || !axes || !eventsLayer) return;
+    if (!app || !axes || !eventsLayer || !gridGfx) return;
 
     const originMs = originAnimatedMsRef.current;
     const blend = layoutBlendRef.current;
 
-    const selected = selectedChannelIds.length ? selectedChannelIds : channels.map((c) => c.id);
-    const channelOrder = new Map(selected.map((id, idx) => [id, idx]));
-    const channelCount = selected.length;
+    const selectedSet = new Set(selectedChannelIds.length ? selectedChannelIds : channels.map((c) => c.id));
+    const orderedSelected = channels.filter((c) => selectedSet.has(c.id)).map((c) => c.id);
+    const channelOrder = new Map(orderedSelected.map((id, idx) => [id, idx]));
+    const channelCount = orderedSelected.length;
 
     axes.clear();
+    gridGfx.clear();
 
     const blendIsZero = Math.abs(blend) < 0.001;
 
@@ -185,22 +409,169 @@ export default function PixiTimeline({ userTimeZone }) {
     const spiralDayStep = (spiralOuterRadius - spiralBaseRadius) / spiralTotalDays;
     const spiralOriginRadius = spiralBaseRadius + futureDays * spiralDayStep;
 
+    const axesTimeZone = resolveDisplayTimeZoneForAxes();
+    const originMidnightMs = getZonedMidnightUtcMs(originMs, axesTimeZone);
+
+    const laneY = 64;
+    const laneGap = 42;
+    const maxLaneY = channelCount ? laneY + (channelCount - 1) * laneGap : laneY;
+
     if (layout === 'linear') {
+      const baselineY = 42;
+      const gridBottom = maxLaneY + 30;
+
+      gridGfx.lineStyle(1, 0xffffff, 0.06);
+
+      const startTickMs = originMidnightMs - pastDays * dayMs;
+      const endTickMs = originMidnightMs + (futureDays + 1) * dayMs;
+
+      const labels = [];
+
+      for (let tMs = startTickMs; tMs <= endTickMs; tMs += 60 * 60 * 1000) {
+        const x = ((tMs - originMs) / dayMs) * 180;
+        const p = getZonedParts(tMs, axesTimeZone);
+        const isMidnight = p.hour === 0 && p.minute === 0;
+        const isMajor = p.hour % 6 === 0 && p.minute === 0;
+
+        if (!isMidnight) {
+          gridGfx.lineStyle(1, 0xffffff, isMajor ? 0.06 : 0.03);
+          gridGfx.moveTo(x, baselineY);
+          gridGfx.lineTo(x, gridBottom);
+        }
+
+        const tickLen = isMajor ? 10 : 6;
+        gridGfx.lineStyle(1, 0xffffff, isMajor ? 0.18 : 0.12);
+        gridGfx.moveTo(x, baselineY - tickLen);
+        gridGfx.lineTo(x, baselineY + tickLen);
+
+        if (isMajor) {
+          labels.push({
+            text: String(p.hour).padStart(2, '0'),
+            x,
+            y: 34,
+          });
+        }
+      }
+
+      for (let tMs = startTickMs; tMs <= endTickMs; tMs += dayMs) {
+        const x = ((tMs - originMs) / dayMs) * 180;
+        gridGfx.lineStyle(1, 0xffffff, 0.08);
+        gridGfx.moveTo(x, baselineY);
+        gridGfx.lineTo(x, gridBottom);
+
+        labels.push({
+          text: formatDateLabel(tMs, axesTimeZone),
+          x,
+          y: 18,
+        });
+      }
+
+      setGridLabels(labels);
+
       axes.lineStyle(2, 0xffffff, 0.18);
-      axes.moveTo(0, 0);
-      axes.lineTo(0, 900);
+      axes.moveTo(0, baselineY);
+      axes.lineTo(0, gridBottom);
+      axes.lineStyle(1, 0xffffff, 0.14);
+      axes.moveTo(-999999, baselineY);
+      axes.lineTo(999999, baselineY);
     } else {
+      gridGfx.lineStyle(1, 0xffffff, 0.08);
+
+      const labels = [];
+
+      const outerMostRadius = spiralOriginRadius + pastDays * spiralDayStep;
+      const tickBaseInner = outerMostRadius + 6;
+      const tickBaseOuter = outerMostRadius + 16;
+      const tickMajorOuter = outerMostRadius + 22;
+      const labelRadius = outerMostRadius + 40;
+
+      const outerAxisRadius = tickBaseInner;
+
+      for (let q = 0; q < 96; q += 1) {
+        const hour = (q / 96) * 24;
+        const isHour = q % 4 === 0;
+        if (isHour) continue;
+
+        const theta = (hour / 24) * Math.PI * 2 - Math.PI / 2;
+        const isHalfHour = q % 2 === 0;
+
+        gridGfx.lineStyle(1, 0xffffff, isHalfHour ? 0.08 : 0.05);
+
+        const x0 = outerAxisRadius * Math.cos(theta);
+        const y0 = outerAxisRadius * Math.sin(theta);
+        const tickOuter = outerAxisRadius + (isHalfHour ? 7 : 5);
+        const x1 = tickOuter * Math.cos(theta);
+        const y1 = tickOuter * Math.sin(theta);
+        gridGfx.moveTo(x0, y0);
+        gridGfx.lineTo(x1, y1);
+      }
+
+      for (let h = 0; h < 24; h += 1) {
+        const theta = (h / 24) * Math.PI * 2 - Math.PI / 2;
+        const isMajor = h % 6 === 0;
+
+        gridGfx.lineStyle(1, 0xffffff, isMajor ? 0.16 : 0.08);
+
+        const x0 = tickBaseInner * Math.cos(theta);
+        const y0 = tickBaseInner * Math.sin(theta);
+
+        const tickOuter = isMajor ? tickMajorOuter : tickBaseOuter;
+        const x1 = tickOuter * Math.cos(theta);
+        const y1 = tickOuter * Math.sin(theta);
+        gridGfx.moveTo(x0, y0);
+        gridGfx.lineTo(x1, y1);
+
+        labels.push({
+          text: String(h).padStart(2, '0'),
+          x: labelRadius * Math.cos(theta),
+          y: labelRadius * Math.sin(theta),
+        });
+      }
+
+      const startDayMs = originMidnightMs - pastDays * dayMs;
+      const endDayMs = originMidnightMs + futureDays * dayMs;
+
+      for (let tMs = startDayMs; tMs <= endDayMs; tMs += dayMs) {
+        const p = computeSpiralPoint(tMs, 0, 1, originMs, spiralOriginRadius, spiralDayStep, axesTimeZone);
+        const r = Math.hypot(p.x, p.y);
+        const s = r > 0 ? (r + 14) / r : 1;
+
+        labels.push({
+          text: formatDateLabel(tMs, axesTimeZone),
+          x: p.x * s,
+          y: p.y * s,
+        });
+      }
+
+      setGridLabels(labels);
+
       axes.lineStyle(2, 0xffffff, 0.14);
       axes.drawCircle(0, 0, spiralOriginRadius);
-    }
+      axes.lineStyle(1, 0xffffff, 0.12);
+      axes.drawCircle(0, 0, outerAxisRadius);
 
+      const spiralStartMs = originMs + futureDays * dayMs;
+      const spiralEndMs = originMs - pastDays * dayMs;
+      const spiralDurationMs = Math.max(1, spiralStartMs - spiralEndMs);
+      const spiralDays = spiralDurationMs / dayMs;
+      const axisPoints = Math.max(64, Math.min(2400, Math.ceil(spiralDays * 96) + 1));
+
+      axes.lineStyle(1, 0xffffff, 0.08);
+      for (let i = 0; i < axisPoints; i += 1) {
+        const tt = spiralStartMs - (spiralDurationMs * i) / (axisPoints - 1);
+        const p = computeSpiralPoint(tt, 0, 1, originMs, spiralOriginRadius, spiralDayStep, axesTimeZone);
+        if (i === 0) axes.moveTo(p.x, p.y);
+        else axes.lineTo(p.x, p.y);
+      }
+    }
     const gfxList = eventGfxRef.current;
     const allItems = itemsRef.current;
 
     for (let i = 0; i < allItems.length; i += 1) {
       const it = allItems[i];
+      if (!channelOrder.has(it.channelId)) continue;
       const idx = channelOrder.get(it.channelId);
-      if (idx === undefined) continue;
+      const y0 = 140 + idx * 44;
 
       const startMs = it.startMs;
       const endMs = it.endMs;
@@ -209,7 +580,7 @@ export default function PixiTimeline({ userTimeZone }) {
       const aMs = Math.min(startMs, endMs);
       const bMs = Math.max(startMs, endMs);
 
-      const channelTz = it.channelTimeZone || userTimeZone || 'UTC';
+      const channelTz = resolveDisplayTimeZoneForItem(it);
 
       const g = gfxList[i];
       if (!g) continue;
@@ -218,7 +589,9 @@ export default function PixiTimeline({ userTimeZone }) {
 
       const color = colorByChannelId.get(it.channelId) || 0x94a3b8;
       const alpha = it.kind === 'scheduled' && it.isCanceled ? 0.18 : it.kind === 'scheduled' ? 0.55 : 0.8;
-      const thickness = it.kind === 'video' ? 10 : 8;
+      const baseThickness = it.kind === 'video' ? 10 : 8;
+      const blendClamped = Math.max(0, Math.min(1, blend));
+      const thickness = baseThickness * (1 - 0.625 * blendClamped);
       const pad = thickness * 0.75 + 8;
 
       if (blendIsZero) {
@@ -228,11 +601,6 @@ export default function PixiTimeline({ userTimeZone }) {
         g.lineStyle(thickness, color, alpha);
         g.moveTo(linearA.x, linearA.y);
         g.lineTo(linearB.x, linearB.y);
-
-        g.beginFill(color, alpha);
-        g.drawCircle(linearA.x, linearA.y, thickness * 0.5);
-        g.drawCircle(linearB.x, linearB.y, thickness * 0.5);
-        g.endFill();
 
         const minX = Math.min(linearA.x, linearB.x) - pad;
         const minY = Math.min(linearA.y, linearB.y) - pad;
@@ -250,12 +618,10 @@ export default function PixiTimeline({ userTimeZone }) {
 
         let points = 2;
         if (durationMs >= 30 * 60 * 1000) {
-          points = Math.ceil(days * 24) + 1;
+          points = Math.ceil(days * 48) + 1;
         }
-        points = Math.max(2, Math.min(80, points));
+        points = Math.max(2, Math.min(160, points));
 
-        let first = null;
-        let last = null;
         let minX = Infinity;
         let minY = Infinity;
         let maxX = -Infinity;
@@ -279,21 +645,9 @@ export default function PixiTimeline({ userTimeZone }) {
 
           if (pi === 0) {
             g.moveTo(x, y);
-            first = { x, y };
           } else {
             g.lineTo(x, y);
           }
-
-          if (pi === points - 1) {
-            last = { x, y };
-          }
-        }
-
-        if (first && last) {
-          g.beginFill(color, alpha);
-          g.drawCircle(first.x, first.y, thickness * 0.5);
-          g.drawCircle(last.x, last.y, thickness * 0.5);
-          g.endFill();
         }
 
         if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY) && g.__hitRect) {
@@ -329,10 +683,6 @@ export default function PixiTimeline({ userTimeZone }) {
       g.__itemIndex = i;
       g.__hitRect = new pixi.Rectangle(0, 0, 1, 1);
       g.hitArea = g.__hitRect;
-
-      g.on('pointerdown', (e) => {
-        if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
-      });
 
       g.on('pointermove', (e) => {
         cancelHoverClear();
@@ -384,62 +734,6 @@ export default function PixiTimeline({ userTimeZone }) {
     }
   }
 
-  function animateOriginTo(nextMs) {
-    originTargetMsRef.current = nextMs;
-    setOriginTargetMs(nextMs);
-
-    const startOrigin = originAnimatedMsRef.current;
-    const start = performance.now();
-    const duration = 420;
-
-    setStatus('');
-
-    function step(now) {
-      const t = Math.min(1, (now - start) / duration);
-      const k = easeInOutCubic(t);
-      originAnimatedMsRef.current = startOrigin + (nextMs - startOrigin) * k;
-      redrawTimeline();
-
-      if (t < 1) {
-        requestAnimationFrame(step);
-      } else {
-        originAnimatedMsRef.current = nextMs;
-        redrawTimeline();
-      }
-    }
-
-    requestAnimationFrame(step);
-  }
-
-  function animateLayoutTo(nextLayout) {
-    const start = performance.now();
-    const duration = 700;
-    const from = layoutBlendRef.current;
-    const to = nextLayout === 'spiral' ? 1 : 0;
-
-    setStatus('');
-
-    function step(now) {
-      const t = Math.min(1, (now - start) / duration);
-      const k = easeInOutCubic(t);
-      const v = from + (to - from) * k;
-      layoutBlendRef.current = v;
-      setLayoutBlend(v);
-      redrawTimeline();
-
-      if (t < 1) {
-        requestAnimationFrame(step);
-      } else {
-        layoutBlendRef.current = to;
-        setLayoutBlend(to);
-        redrawTimeline();
-        setStatus('');
-      }
-    }
-
-    requestAnimationFrame(step);
-  }
-
   async function loadConfig() {
     try {
       const res = await fetch('/api/timeline/config', { cache: 'no-store' });
@@ -486,6 +780,56 @@ export default function PixiTimeline({ userTimeZone }) {
     return json;
   }
 
+  function applyTimelineJson(json) {
+    setChannels(json.channels || []);
+
+    const byId = new Map((json.channels || []).map((c) => [c.id, c]));
+
+    const nextItems = [];
+
+    for (const s of json.scheduleSegments || []) {
+      const st = s.startTimeIso ? new Date(s.startTimeIso).getTime() : NaN;
+      const en = s.endTimeIso ? new Date(s.endTimeIso).getTime() : NaN;
+      const c = byId.get(s.channelId);
+      nextItems.push({
+        id: `sched_${s.id}`,
+        kind: 'scheduled',
+        channelId: s.channelId,
+        channelLogin: c?.login || '',
+        channelTimeZone: c?.timeZone || null,
+        title: s.title || '',
+        startMs: st,
+        endMs: en,
+        isCanceled: Boolean(s.isCanceled),
+        url: null,
+      });
+    }
+
+    for (const v of json.videos || []) {
+      const st = v.startedAtIso ? new Date(v.startedAtIso).getTime() : NaN;
+      const en = v.endedAtIso ? new Date(v.endedAtIso).getTime() : NaN;
+      const c = byId.get(v.channelId);
+      nextItems.push({
+        id: `vid_${v.id}`,
+        kind: 'video',
+        channelId: v.channelId,
+        channelLogin: c?.login || '',
+        channelTimeZone: c?.timeZone || null,
+        title: v.title || '',
+        startMs: st,
+        endMs: Number.isFinite(en) ? en : Number.isFinite(st) ? st : NaN,
+        isCanceled: false,
+        url: v.url || null,
+        viewCount: v.viewCount,
+      });
+    }
+
+    nextItems.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+
+    setItems(nextItems);
+    itemsRef.current = nextItems;
+  }
+
   useEffect(() => {
     let destroyed = false;
 
@@ -493,7 +837,7 @@ export default function PixiTimeline({ userTimeZone }) {
       const el = containerRef.current;
       if (!el) return;
 
-      const { Application, Container, Graphics } = await import('pixi.js');
+      const { Application, Container, Graphics, Text: PixiText, Rectangle } = await import('pixi.js');
 
       if (destroyed) return;
 
@@ -529,6 +873,16 @@ export default function PixiTimeline({ userTimeZone }) {
       const world = new Container();
       worldRef.current = world;
       app.stage.addChild(world);
+
+      pixiTextCtorRef.current = PixiText;
+
+      const gridGfx = new Graphics();
+      gridGfxRef.current = gridGfx;
+      world.addChild(gridGfx);
+
+      const gridLabelsLayer = new Container();
+      gridLabelsLayerRef.current = gridLabelsLayer;
+      world.addChild(gridLabelsLayer);
 
       const axesGfx = new Graphics();
       axesGfxRef.current = axesGfx;
@@ -601,11 +955,13 @@ export default function PixiTimeline({ userTimeZone }) {
       el.addEventListener('wheel', onWheel, { passive: false });
 
       resetView();
+      redrawTimeline();
       renderNow();
 
       const onResize = () => {
         app.stage.hitArea = app.screen;
         resetView();
+        redrawTimeline();
         requestRender();
       };
 
@@ -616,6 +972,7 @@ export default function PixiTimeline({ userTimeZone }) {
         el.removeEventListener('wheel', onWheel);
         requestRenderRef.current = () => {};
         renderNowRef.current = () => {};
+        pixiTextCtorRef.current = null;
         app.destroy(true, { children: true, texture: true, baseTexture: true });
       };
     }
@@ -648,10 +1005,18 @@ export default function PixiTimeline({ userTimeZone }) {
       const cfgSelected = Array.isArray(cfg?.selectedChannelIds)
         ? cfg.selectedChannelIds.map((s) => String(s || '').trim()).filter(Boolean)
         : [];
+      const cfgModeRaw = cfg?.displayTimeZoneMode !== undefined ? String(cfg.displayTimeZoneMode) : 'user';
+      const cfgMode =
+        cfgModeRaw === 'utc' || cfgModeRaw === 'user' || cfgModeRaw === 'channel' || cfgModeRaw === 'custom' ? cfgModeRaw : 'user';
+
+      const cfgCustomTzRaw = cfg?.customTimeZone !== undefined ? String(cfg.customTimeZone || '').trim() : '';
+      const cfgCustomTz = cfgCustomTzRaw || userTimeZone || 'UTC';
 
       setPastDays(cfgPast);
       setFutureDays(cfgFuture);
       if (cfgSelected.length) setSelectedChannelIds(cfgSelected);
+      setDisplayTimeZoneMode(cfgMode);
+      setCustomTimeZone(cfgCustomTz);
 
       try {
         setStatus('Loading…');
@@ -663,54 +1028,8 @@ export default function PixiTimeline({ userTimeZone }) {
         });
         if (!mounted) return;
 
-        setChannels(json.channels || []);
+        applyTimelineJson(json);
         setSelectedChannelIds((prev) => (cfgSelected.length ? cfgSelected : prev.length ? prev : json.selectedChannelIds || []));
-
-        const byId = new Map((json.channels || []).map((c) => [c.id, c]));
-
-        const nextItems = [];
-
-        for (const s of json.scheduleSegments || []) {
-          const st = s.startTimeIso ? new Date(s.startTimeIso).getTime() : NaN;
-          const en = s.endTimeIso ? new Date(s.endTimeIso).getTime() : NaN;
-          const c = byId.get(s.channelId);
-          nextItems.push({
-            id: `sched_${s.id}`,
-            kind: 'scheduled',
-            channelId: s.channelId,
-            channelLogin: c?.login || '',
-            channelTimeZone: c?.timeZone || null,
-            title: s.title || '',
-            startMs: st,
-            endMs: en,
-            isCanceled: Boolean(s.isCanceled),
-            url: null,
-          });
-        }
-
-        for (const v of json.videos || []) {
-          const st = v.startedAtIso ? new Date(v.startedAtIso).getTime() : NaN;
-          const en = v.endedAtIso ? new Date(v.endedAtIso).getTime() : NaN;
-          const c = byId.get(v.channelId);
-          nextItems.push({
-            id: `vid_${v.id}`,
-            kind: 'video',
-            channelId: v.channelId,
-            channelLogin: c?.login || '',
-            channelTimeZone: c?.timeZone || null,
-            title: v.title || '',
-            startMs: st,
-            endMs: Number.isFinite(en) ? en : Number.isFinite(st) ? st : NaN,
-            isCanceled: false,
-            url: v.url || null,
-            viewCount: v.viewCount,
-          });
-        }
-
-        nextItems.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
-
-        setItems(nextItems);
-        itemsRef.current = nextItems;
 
         const pixi = await import('pixi.js');
         ensureEventGraphics(pixi);
@@ -735,13 +1054,25 @@ export default function PixiTimeline({ userTimeZone }) {
         selectedChannelIds,
         pastDays,
         futureDays,
+        displayTimeZoneMode,
+        customTimeZone,
       });
     }, 600);
 
     return () => {
       if (timeout) clearTimeout(timeout);
     };
-  }, [selectedChannelIds, pastDays, futureDays]);
+  }, [selectedChannelIds, pastDays, futureDays, displayTimeZoneMode, customTimeZone]);
+
+  useEffect(() => {
+    if (displayTimeZoneMode !== 'custom') return;
+    if (!customTimeZone) return;
+    try {
+      new Intl.DateTimeFormat(undefined, { timeZone: customTimeZone }).format(new Date());
+    } catch {
+      setCustomTimeZone(userTimeZone || 'UTC');
+    }
+  }, [customTimeZone, displayTimeZoneMode, userTimeZone]);
 
   useEffect(() => {
     if (!channels.length) return;
@@ -818,6 +1149,33 @@ export default function PixiTimeline({ userTimeZone }) {
     };
   }, [originTargetMs, pastDays, futureDays, selectedChannelIds]);
 
+  async function reorderChannel(channelId, direction) {
+    if (!isAdmin) return;
+    try {
+      setStatus('Reordering…');
+      const res = await fetch('/api/twitch/channels/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelId, direction }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Reorder failed: ${res.status} ${text}`);
+      }
+
+      const json = await loadTimelineData({
+        originMs: originTargetMsRef.current,
+        past: pastDays,
+        future: futureDays,
+        selectedIds: selectedChannelIds,
+      });
+      applyTimelineJson(json);
+      setStatus('');
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : 'Failed to reorder');
+    }
+  }
+
   useEffect(() => {
     const onKeyDown = (e) => {
       const tag = e?.target?.tagName ? String(e.target.tagName).toLowerCase() : '';
@@ -846,7 +1204,7 @@ export default function PixiTimeline({ userTimeZone }) {
 
   useEffect(() => {
     redrawTimeline();
-  }, [items, channels, selectedChannelIds, pastDays, futureDays, layoutBlend]);
+  }, [items, channels, selectedChannelIds, pastDays, futureDays, displayTimeZoneMode, customTimeZone, layoutBlend]);
 
   return (
     <Card>
@@ -893,25 +1251,37 @@ export default function PixiTimeline({ userTimeZone }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {channels.map((c, idx) => {
                 const checked = selectedChannelIds.length ? selectedChannelIds.includes(c.id) : true;
-                const color = palette[idx % palette.length];
-                const hex = `#${color.toString(16).padStart(6, '0')}`;
+                const hex = colorCssByChannelId.get(c.id) || '#94a3b8';
                 return (
-                  <label key={c.id} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(e) => {
-                        const nextChecked = e.target.checked;
-                        setSelectedChannelIds((prev) => {
-                          const base = prev.length ? prev : channels.map((x) => x.id);
-                          if (nextChecked) return Array.from(new Set([...base, c.id]));
-                          return base.filter((id) => id !== c.id);
-                        });
-                      }}
-                    />
-                    <span style={{ width: 10, height: 10, borderRadius: 3, background: hex, display: 'inline-block' }} />
-                    <Text size="2">{c.displayName || c.login}</Text>
-                  </label>
+                  <Flex key={c.id} gap="2" align="center" wrap="wrap">
+                    <label style={{ display: 'flex', gap: 10, alignItems: 'center', flex: 1, minWidth: 180 }}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const nextChecked = e.target.checked;
+                          setSelectedChannelIds((prev) => {
+                            const base = prev.length ? prev : channels.map((x) => x.id);
+                            if (nextChecked) return Array.from(new Set([...base, c.id]));
+                            return base.filter((id) => id !== c.id);
+                          });
+                        }}
+                      />
+                      <span style={{ width: 10, height: 10, borderRadius: 3, background: hex, display: 'inline-block' }} />
+                      <Text size="2">{c.displayName || c.login}</Text>
+                    </label>
+
+                    {isAdmin ? (
+                      <Flex gap="1" align="center">
+                        <Button variant="soft" type="button" onClick={() => reorderChannel(c.id, 'up')}>
+                          Up
+                        </Button>
+                        <Button variant="soft" type="button" onClick={() => reorderChannel(c.id, 'down')}>
+                          Down
+                        </Button>
+                      </Flex>
+                    ) : null}
+                  </Flex>
                 );
               })}
             </div>
@@ -919,6 +1289,37 @@ export default function PixiTimeline({ userTimeZone }) {
             <Text size="2" color="gray" style={{ marginTop: 10 }}>
               Window
             </Text>
+
+            <Text size="2" color="gray" style={{ marginTop: 10 }}>
+              Timezone
+            </Text>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Text size="2" style={{ width: 90 }}>
+                Display
+              </Text>
+              <select
+                value={displayTimeZoneMode}
+                onChange={(e) => {
+                  const v = String(e.target.value);
+                  setDisplayTimeZoneMode(v === 'utc' || v === 'user' || v === 'channel' || v === 'custom' ? v : 'user');
+                }}
+              >
+                <option value="user">User</option>
+                <option value="utc">UTC</option>
+                <option value="channel">Channel-local</option>
+                <option value="custom">Custom…</option>
+              </select>
+            </label>
+
+            {displayTimeZoneMode === 'custom' ? (
+              <TimeZonePicker
+                initialTimeZone={customTimeZone || userTimeZone || 'UTC'}
+                fieldName="__ignored"
+                recentsStorageKey="t24_recent_timeline_custom_time_zones_v1"
+                onChange={(tz) => setCustomTimeZone(tz)}
+              />
+            ) : null}
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <Text size="2" style={{ width: 90 }}>
@@ -964,7 +1365,7 @@ export default function PixiTimeline({ userTimeZone }) {
               Origin
             </Text>
             <Text size="2" color="gray">
-              {formatInTimeZoneClient(new Date(originTargetMs).toISOString(), userTimeZone || 'UTC')}
+              {formatInTimeZoneClient(new Date(originTargetMs).toISOString(), resolveDisplayTimeZoneForAxes())}
             </Text>
             <Text size="2" color="gray">
               Arrow keys: left = future, right = past
@@ -984,6 +1385,26 @@ export default function PixiTimeline({ userTimeZone }) {
                 touchAction: 'none',
               }}
             />
+
+            <div
+              style={{
+                position: 'absolute',
+                left: 12,
+                top: 10,
+                padding: '6px 10px',
+                borderRadius: 999,
+                border: '1px solid rgba(255,255,255,0.14)',
+                background: 'rgba(10,10,10,0.55)',
+                pointerEvents: 'none',
+              }}
+            >
+              <Text size="2" color="gray">
+                TZ:{' '}
+                <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
+                  {resolveDisplayTimeZoneForAxes()}
+                </span>
+              </Text>
+            </div>
 
             {hover?.item ? (
               <div
@@ -1008,12 +1429,12 @@ export default function PixiTimeline({ userTimeZone }) {
                 <Text size="2">{hover.item.title || '-'}</Text>
                 <Text size="2" color="gray">
                   {Number.isFinite(hover.item.startMs)
-                    ? formatInTimeZoneClient(new Date(hover.item.startMs).toISOString(), userTimeZone || 'UTC')
+                    ? formatInTimeZoneClient(new Date(hover.item.startMs).toISOString(), resolveDisplayTimeZoneForItem(hover.item))
                     : '-'}
                 </Text>
                 <Text size="2" color="gray">
                   {Number.isFinite(hover.item.endMs)
-                    ? formatInTimeZoneClient(new Date(hover.item.endMs).toISOString(), userTimeZone || 'UTC')
+                    ? formatInTimeZoneClient(new Date(hover.item.endMs).toISOString(), resolveDisplayTimeZoneForItem(hover.item))
                     : '-'}
                 </Text>
                 {hover.item.url ? (

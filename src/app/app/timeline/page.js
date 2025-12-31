@@ -12,6 +12,9 @@ export default async function TimelinePage() {
     redirect('/login');
   }
 
+  const initialNowMs = Date.now();
+  const isAdmin = session.user?.role === 'admin';
+
   return (
     <Flex direction="column" gap="4">
       <Card>
@@ -23,7 +26,7 @@ export default async function TimelinePage() {
         </Flex>
       </Card>
 
-      <PixiTimeline userTimeZone={session.user?.timeZone || 'UTC'} />
+      <PixiTimeline userTimeZone={session.user?.timeZone || 'UTC'} initialNowMs={initialNowMs} isAdmin={isAdmin} />
     </Flex>
   );
 }

@@ -37,12 +37,14 @@ export async function GET(req) {
     where: {
       isEnabled: true,
     },
-    orderBy: [{ login: 'asc' }],
+    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }, { login: 'asc' }],
     select: {
       id: true,
       login: true,
       displayName: true,
+      colorHex: true,
       timeZone: true,
+      sortOrder: true,
     },
   });
 

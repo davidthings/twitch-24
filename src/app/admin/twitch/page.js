@@ -3,9 +3,18 @@ import { redirect } from 'next/navigation';
 import { Button, Flex, Heading, Link, Text } from '@radix-ui/themes';
 
 import { authOptions } from '@/lib/auth';
-import { formatInTimeZone } from '@/lib/datetime';
 import { prisma } from '@/lib/prisma';
 import { getTwitchUserByLogin } from '@/lib/twitch';
+
+const DEFAULT_CHANNEL_COLORS = ['#60a5fa', '#a78bfa', '#34d399', '#fbbf24', '#f87171', '#22c55e', '#38bdf8', '#fb7185', '#f97316', '#94a3b8'];
+
+function hashStringToIndex(str, mod) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  }
+  return mod ? hash % mod : hash;
+}
 
 async function requireAdmin() {
   const session = await getServerSession(authOptions);
@@ -16,38 +25,73 @@ async function requireAdmin() {
 
 async function loadData() {
   const channels = await prisma.twitchChannel.findMany({
-    orderBy: [{ createdAt: 'asc' }],
+    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     select: {
       id: true,
       login: true,
       broadcasterId: true,
       displayName: true,
+      colorHex: true,
+      sortOrder: true,
       timeZone: true,
-      isEnabled: true,
-      pollSchedule: true,
-      pollStreams: true,
-      pollVideos: true,
-      lastScheduleSyncAt: true,
-      lastStreamSyncAt: true,
-      lastVideoSyncAt: true,
-      createdAt: true,
-      updatedAt: true,
-      _count: {
-        select: {
-          scheduleSegments: true,
-          streamSnapshots: true,
-          videos: true,
-        },
-      },
     },
   });
+
+  const missingColor = channels.filter((c) => !c.colorHex);
+  if (missingColor.length) {
+    await prisma.$transaction(
+      missingColor.map((c) => {
+        const defaultColorHex = DEFAULT_CHANNEL_COLORS[hashStringToIndex(c.broadcasterId || c.login || c.id, DEFAULT_CHANNEL_COLORS.length)];
+        return prisma.twitchChannel.updateMany({
+          where: { id: c.id, colorHex: null },
+          data: { colorHex: defaultColorHex },
+        });
+      })
+    );
+
+    for (const c of missingColor) {
+      c.colorHex = DEFAULT_CHANNEL_COLORS[hashStringToIndex(c.broadcasterId || c.login || c.id, DEFAULT_CHANNEL_COLORS.length)];
+    }
+  }
 
   return { channels };
 }
 
 export default async function AdminTwitchPage() {
   const session = await requireAdmin();
-  const timeZone = session.user?.timeZone || 'UTC';
+
+  async function moveChannel(formData) {
+    'use server';
+
+    await requireAdmin();
+
+    const channelId = String(formData.get('channelId') || '');
+    const direction = String(formData.get('direction') || '');
+    if (!channelId) return;
+    if (direction !== 'up' && direction !== 'down') return;
+
+    const channels = await prisma.twitchChannel.findMany({
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+      select: { id: true, sortOrder: true },
+    });
+
+    const idx = channels.findIndex((c) => c.id === channelId);
+    if (idx < 0) return;
+    if (direction === 'up' && idx === 0) return;
+    if (direction === 'down' && idx === channels.length - 1) return;
+
+    const otherIdx = direction === 'up' ? idx - 1 : idx + 1;
+    const a = channels[idx];
+    const b = channels[otherIdx];
+    if (!a || !b) return;
+
+    await prisma.$transaction([
+      prisma.twitchChannel.update({ where: { id: a.id }, data: { sortOrder: b.sortOrder } }),
+      prisma.twitchChannel.update({ where: { id: b.id }, data: { sortOrder: a.sortOrder } }),
+    ]);
+
+    redirect('/admin/twitch');
+  }
 
   async function addChannel(formData) {
     'use server';
@@ -63,44 +107,34 @@ export default async function AdminTwitchPage() {
       redirect(`/admin/twitch?error=${encodeURIComponent('Channel not found on Twitch')}`);
     }
 
+    const existing = await prisma.twitchChannel.findUnique({
+      where: { broadcasterId: twitchUser.id },
+      select: { id: true, colorHex: true, sortOrder: true },
+    });
+
+    const count = await prisma.twitchChannel.count();
+    const defaultColorHex = DEFAULT_CHANNEL_COLORS[count % DEFAULT_CHANNEL_COLORS.length];
+
+    const maxSort = await prisma.twitchChannel.aggregate({
+      _max: { sortOrder: true },
+    });
+    const nextSortOrder = (maxSort?._max?.sortOrder ?? -1) + 1;
+
     await prisma.twitchChannel.upsert({
       where: { broadcasterId: twitchUser.id },
       create: {
         login: twitchUser.login,
         broadcasterId: twitchUser.id,
         displayName: twitchUser.displayName,
+        colorHex: defaultColorHex,
+        sortOrder: nextSortOrder,
       },
       update: {
         login: twitchUser.login,
         displayName: twitchUser.displayName,
         isEnabled: true,
+        ...(existing && !existing.colorHex ? { colorHex: defaultColorHex } : {}),
       },
-    });
-
-    redirect('/admin/twitch');
-  }
-
-  async function toggleChannel(formData) {
-    'use server';
-
-    await requireAdmin();
-
-    const id = String(formData.get('id') || '');
-    const field = String(formData.get('field') || '');
-
-    if (!id) return;
-    if (field !== 'isEnabled' && field !== 'pollSchedule' && field !== 'pollStreams' && field !== 'pollVideos') return;
-
-    const current = await prisma.twitchChannel.findUnique({
-      where: { id },
-      select: { id: true, isEnabled: true, pollSchedule: true, pollStreams: true, pollVideos: true },
-    });
-
-    if (!current) return;
-
-    await prisma.twitchChannel.update({
-      where: { id },
-      data: { [field]: !current[field] },
     });
 
     redirect('/admin/twitch');
@@ -184,72 +218,53 @@ export default async function AdminTwitchPage() {
             <thead>
               <tr>
                 <th style={{ textAlign: 'left', padding: '8px 6px' }}>Login</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Broadcaster ID</th>
                 <th style={{ textAlign: 'left', padding: '8px 6px' }}>TZ</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Enabled</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Poll schedule</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Poll streams</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Poll videos</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Schedule segs</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Stream snaps</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Videos</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Last schedule</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Last stream</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Last video</th>
+                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Color</th>
                 <th style={{ textAlign: 'left', padding: '8px 6px' }}>Actions</th>
+                <th style={{ textAlign: 'left', padding: '8px 6px' }}>Order</th>
               </tr>
             </thead>
             <tbody>
               {channels.map((c) => (
                 <tr key={c.id}>
                   <td style={{ padding: '8px 6px' }}>{c.login}</td>
-                  <td style={{ padding: '8px 6px' }}>{c.broadcasterId}</td>
                   <td style={{ padding: '8px 6px' }}>{c.timeZone || '-'}</td>
-                  <td style={{ padding: '8px 6px' }}>{c.isEnabled ? 'yes' : 'no'}</td>
-                  <td style={{ padding: '8px 6px' }}>{c.pollSchedule ? 'yes' : 'no'}</td>
-                  <td style={{ padding: '8px 6px' }}>{c.pollStreams ? 'yes' : 'no'}</td>
-                  <td style={{ padding: '8px 6px' }}>{c.pollVideos ? 'yes' : 'no'}</td>
-                  <td style={{ padding: '8px 6px' }}>{c._count.scheduleSegments}</td>
-                  <td style={{ padding: '8px 6px' }}>{c._count.streamSnapshots}</td>
-                  <td style={{ padding: '8px 6px' }}>{c._count.videos}</td>
-                  <td style={{ padding: '8px 6px' }}>{c.lastScheduleSyncAt ? formatInTimeZone(c.lastScheduleSyncAt, timeZone) : '-'}</td>
-                  <td style={{ padding: '8px 6px' }}>{c.lastStreamSyncAt ? formatInTimeZone(c.lastStreamSyncAt, timeZone) : '-'}</td>
-                  <td style={{ padding: '8px 6px' }}>{c.lastVideoSyncAt ? formatInTimeZone(c.lastVideoSyncAt, timeZone) : '-'}</td>
                   <td style={{ padding: '8px 6px' }}>
-                    <Flex gap="2" wrap="wrap">
-                      <Button asChild variant="soft">
-                        <Link href={`/admin/twitch/${c.id}`}>Details</Link>
-                      </Button>
-
-                      <form action={toggleChannel}>
-                        <input type="hidden" name="id" value={c.id} />
-                        <input type="hidden" name="field" value="isEnabled" />
+                    <Flex gap="2" align="center" wrap="wrap">
+                      <span
+                        style={{
+                          width: 14,
+                          height: 14,
+                          borderRadius: 4,
+                          background: c.colorHex || 'transparent',
+                          border: '1px solid rgba(255,255,255,0.25)',
+                          display: 'inline-block',
+                        }}
+                      />
+                      <Text size="2" color="gray" style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
+                        {c.colorHex || '-'}
+                      </Text>
+                    </Flex>
+                  </td>
+                  <td style={{ padding: '8px 6px' }}>
+                    <Button asChild variant="soft">
+                      <Link href={`/admin/twitch/${c.id}`}>View / Edit</Link>
+                    </Button>
+                  </td>
+                  <td style={{ padding: '8px 6px' }}>
+                    <Flex gap="2" align="center" wrap="wrap">
+                      <form action={moveChannel}>
+                        <input type="hidden" name="channelId" value={c.id} />
+                        <input type="hidden" name="direction" value="up" />
                         <Button variant="soft" type="submit">
-                          {c.isEnabled ? 'Disable' : 'Enable'}
+                          Up
                         </Button>
                       </form>
-
-                      <form action={toggleChannel}>
-                        <input type="hidden" name="id" value={c.id} />
-                        <input type="hidden" name="field" value="pollSchedule" />
+                      <form action={moveChannel}>
+                        <input type="hidden" name="channelId" value={c.id} />
+                        <input type="hidden" name="direction" value="down" />
                         <Button variant="soft" type="submit">
-                          Schedule: {c.pollSchedule ? 'on' : 'off'}
-                        </Button>
-                      </form>
-
-                      <form action={toggleChannel}>
-                        <input type="hidden" name="id" value={c.id} />
-                        <input type="hidden" name="field" value="pollStreams" />
-                        <Button variant="soft" type="submit">
-                          Streams: {c.pollStreams ? 'on' : 'off'}
-                        </Button>
-                      </form>
-
-                      <form action={toggleChannel}>
-                        <input type="hidden" name="id" value={c.id} />
-                        <input type="hidden" name="field" value="pollVideos" />
-                        <Button variant="soft" type="submit">
-                          Videos: {c.pollVideos ? 'on' : 'off'}
+                          Down
                         </Button>
                       </form>
                     </Flex>
@@ -258,7 +273,7 @@ export default async function AdminTwitchPage() {
               ))}
               {channels.length === 0 ? (
                 <tr>
-                  <td style={{ padding: '8px 6px' }} colSpan={13}>
+                  <td style={{ padding: '8px 6px' }} colSpan={5}>
                     <Text color="gray" size="2">
                       No channels yet.
                     </Text>

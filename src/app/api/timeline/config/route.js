@@ -9,6 +9,17 @@ const clampInt = (n, min, max) => {
   return Math.max(min, Math.min(max, Math.trunc(x)));
 };
 
+const isValidTimeZone = (tz) => {
+  const v = String(tz || '').trim();
+  if (!v) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: v }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
@@ -48,10 +59,19 @@ export async function POST(req) {
   const pastDays = cfg.pastDays !== undefined ? clampInt(cfg.pastDays, 0, 365) : null;
   const futureDays = cfg.futureDays !== undefined ? clampInt(cfg.futureDays, 0, 365) : null;
 
+  const modeRaw = cfg.displayTimeZoneMode !== undefined ? String(cfg.displayTimeZoneMode) : null;
+  const displayTimeZoneMode =
+    modeRaw === 'utc' || modeRaw === 'user' || modeRaw === 'channel' || modeRaw === 'custom' ? modeRaw : null;
+
+  const customTimeZoneRaw = cfg.customTimeZone !== undefined ? String(cfg.customTimeZone) : null;
+  const customTimeZone = customTimeZoneRaw && isValidTimeZone(customTimeZoneRaw) ? customTimeZoneRaw.trim() : null;
+
   const timelineConfig = {
     ...(selectedChannelIds ? { selectedChannelIds } : {}),
     ...(pastDays !== null ? { pastDays } : {}),
     ...(futureDays !== null ? { futureDays } : {}),
+    ...(displayTimeZoneMode ? { displayTimeZoneMode } : {}),
+    ...(customTimeZone ? { customTimeZone } : {}),
   };
 
   await prisma.user.update({

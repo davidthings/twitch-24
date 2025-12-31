@@ -84,6 +84,10 @@ model TwitchChannel {
   broadcasterId    String   @unique
   displayName      String?
 
+  colorHex         String?
+
+  sortOrder        Int      @default(0)
+
   timeZone         String?
 
   isEnabled        Boolean  @default(true)
@@ -101,6 +105,8 @@ model TwitchChannel {
 
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+
+  @@index([sortOrder])
 }
 
 model TwitchScheduleSegment {
