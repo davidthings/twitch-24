@@ -10,6 +10,9 @@ export default function Nav() {
         <NextLink href="/">Home</NextLink>
       </Link>
       <Link asChild>
+        <NextLink href="/channels/">Channels</NextLink>
+      </Link>
+      <Link asChild>
         <NextLink href="/twitch/login/">Twitch Login</NextLink>
       </Link>
       <Link asChild>
