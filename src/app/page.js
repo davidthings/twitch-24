@@ -6,7 +6,10 @@ export default function HomePage() {
       <Flex direction="column" gap="2">
         <Heading size="4">Welcome</Heading>
         <Text color="gray">
-          This is the starting point for the hosted Twitch analysis app.
+          Static build smoke test: use Twitch OAuth and verify Helix access.
+        </Text>
+        <Text color="gray">
+          Start at <a href="/twitch/login/">/twitch/login/</a>.
         </Text>
       </Flex>
     </Card>
