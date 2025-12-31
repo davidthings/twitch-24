@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import NextLink from 'next/link';
 import { Box, Button, Card, Code, Flex, Heading, Separator, Text, TextField, Callout } from '@radix-ui/themes';
 
 import { buildAuthUrl, buildRedirectUri, generateState } from '@/lib/twitchAuth/oauth';
@@ -144,7 +145,7 @@ export default function TwitchLoginPage() {
               Signed in as <strong>{user?.display_name || user?.login || 'user'}</strong>
             </Text>
             <Button asChild>
-              <a href="/twitch/me/">Go to /twitch/me</a>
+              <NextLink href="/twitch/me/">Go to /twitch/me</NextLink>
             </Button>
           </Flex>
         </Card>

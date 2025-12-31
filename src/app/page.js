@@ -1,4 +1,5 @@
 import { Card, Flex, Heading, Text } from '@radix-ui/themes';
+import Link from 'next/link';
 
 export default function HomePage() {
   return (
@@ -9,7 +10,7 @@ export default function HomePage() {
           Static build smoke test: use Twitch OAuth and verify Helix access.
         </Text>
         <Text color="gray">
-          Start at <a href="/twitch/login/">/twitch/login/</a>.
+          Start at <Link href="/twitch/login/">/twitch/login/</Link>.
         </Text>
       </Flex>
     </Card>
