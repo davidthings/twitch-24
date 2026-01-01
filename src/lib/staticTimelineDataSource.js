@@ -5,6 +5,8 @@ import { apiGet } from './twitchAuth/helix';
 const dayMs = 24 * 60 * 60 * 1000;
 
 const CACHE_KEY = 't24_static_timeline_cache_v1';
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const CHANNEL_CACHE_TTL_MS = 20 * 60 * 1000;
 
 function safeParseJson(text) {
   try {
@@ -33,6 +35,22 @@ function saveCache(obj) {
     window.localStorage.setItem(CACHE_KEY, JSON.stringify(obj));
   } catch {
   }
+}
+
+function ensureCacheV2(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return { version: 2, ts: Date.now(), channels: {} };
+  }
+  if (raw.version === 2 && raw.channels && typeof raw.channels === 'object') {
+    return raw;
+  }
+  return {
+    version: 2,
+    ts: typeof raw.ts === 'number' ? raw.ts : Date.now(),
+    ...(raw.key ? { key: raw.key } : {}),
+    ...(raw.data ? { data: raw.data } : {}),
+    channels: {},
+  };
 }
 
 function parseDurationSeconds(s) {
@@ -161,35 +179,51 @@ async function fetchVideos({ selectedChannels, windowStartIso, windowEndIso }) {
   await withConcurrency(selectedChannels, 4, async (c) => {
     if (!c.broadcasterId) return;
     try {
-      const json = await apiGet('/videos', {
-        user_id: c.broadcasterId,
-        first: 50,
-        type: 'archive',
-        sort: 'time',
-      });
-      const vids = Array.isArray(json?.data) ? json.data : [];
-      for (const v of vids) {
-        const startedAtIso = String(v?.created_at || v?.published_at || '');
-        if (!startedAtIso) continue;
-        const st = new Date(startedAtIso).getTime();
-        if (!Number.isFinite(st)) continue;
+      let cursor = null;
+      let minStartMs = null;
 
-        const durationSeconds = parseDurationSeconds(v?.duration);
-        const en = durationSeconds !== null ? st + durationSeconds * 1000 : null;
-
-        // filter to window (simple overlap)
-        if (st >= we) continue;
-        if (en !== null && en <= ws) continue;
-
-        out.push({
-          id: String(v?.id || v?.video_id || ''),
-          channelId: c.id,
-          title: String(v?.title || ''),
-          url: String(v?.url || ''),
-          startedAtIso,
-          endedAtIso: en !== null ? new Date(en).toISOString() : null,
-          viewCount: Number.isFinite(Number(v?.view_count)) ? Number(v.view_count) : null,
+      for (let page = 0; page < 12; page += 1) {
+        const json = await apiGet('/videos', {
+          user_id: c.broadcasterId,
+          first: 100,
+          type: 'archive',
+          sort: 'time',
+          ...(cursor ? { after: cursor } : null),
         });
+
+        const vids = Array.isArray(json?.data) ? json.data : [];
+        const nextCursor = String(json?.pagination?.cursor || '').trim() || null;
+
+        for (const v of vids) {
+          const startedAtIso = String(v?.created_at || v?.published_at || '');
+          if (!startedAtIso) continue;
+          const st = new Date(startedAtIso).getTime();
+          if (!Number.isFinite(st)) continue;
+
+          minStartMs = minStartMs === null ? st : Math.min(minStartMs, st);
+
+          const durationSeconds = parseDurationSeconds(v?.duration);
+          const en = durationSeconds !== null ? st + durationSeconds * 1000 : null;
+
+          // filter to window (simple overlap)
+          if (st >= we) continue;
+          if (en !== null && en <= ws) continue;
+
+          out.push({
+            id: String(v?.id || v?.video_id || ''),
+            channelId: c.id,
+            title: String(v?.title || ''),
+            url: String(v?.url || ''),
+            startedAtIso,
+            endedAtIso: en !== null ? new Date(en).toISOString() : null,
+            viewCount: Number.isFinite(Number(v?.view_count)) ? Number(v.view_count) : null,
+          });
+        }
+
+        if (!nextCursor) break;
+        if (!vids.length) break;
+        if (minStartMs !== null && Number.isFinite(ws) && minStartMs <= ws) break;
+        cursor = nextCursor;
       }
     } catch {
     }
@@ -226,17 +260,23 @@ export function createStaticTimelineDataSource() {
 
       const selectedFiltered = selected.filter((id) => enabledSet.has(id));
 
-      const windowStart = new Date(origin - past * dayMs);
-      const windowEnd = new Date(origin + future * dayMs);
+      const windowStartMs = Math.floor((origin - past * dayMs) / dayMs) * dayMs;
+      const windowEndMs = Math.ceil((origin + future * dayMs) / dayMs) * dayMs;
+
+      const windowStart = new Date(windowStartMs);
+      const windowEnd = new Date(windowEndMs);
+
+      const windowStartIso = windowStart.toISOString();
+      const windowEndIso = windowEnd.toISOString();
 
       const cacheKey = JSON.stringify({
         selected: selectedFiltered.slice().sort(),
-        ws: windowStart.toISOString(),
-        we: windowEnd.toISOString(),
+        ws: windowStartIso,
+        we: windowEndIso,
       });
       const cached = loadCache();
       const now = Date.now();
-      if (cached && cached.key === cacheKey && typeof cached.ts === 'number' && now - cached.ts < 20_000 && cached.data) {
+      if (cached && cached.key === cacheKey && typeof cached.ts === 'number' && now - cached.ts < CACHE_TTL_MS && cached.data) {
         return cached.data;
       }
 
@@ -248,11 +288,72 @@ export function createStaticTimelineDataSource() {
       await resolveBroadcasterIds(enabledMutable);
       saveChannels(allMutable);
 
-      const windowStartIso = windowStart.toISOString();
-      const windowEndIso = windowEnd.toISOString();
+      const cacheV2 = ensureCacheV2(cached);
+      const channelCache = cacheV2.channels && typeof cacheV2.channels === 'object' ? cacheV2.channels : {};
 
-      const scheduleSegments = await fetchScheduleSegments({ selectedChannels, windowStartIso, windowEndIso });
-      const videos = await fetchVideos({ selectedChannels, windowStartIso, windowEndIso });
+      const scheduleSegments = [];
+      const videos = [];
+      const missingChannels = [];
+
+      for (const c of selectedChannels) {
+        const entry = channelCache[c.id];
+        const okEntry =
+          entry &&
+          typeof entry === 'object' &&
+          typeof entry.ts === 'number' &&
+          typeof entry.wsMs === 'number' &&
+          typeof entry.weMs === 'number' &&
+          now - entry.ts < CHANNEL_CACHE_TTL_MS &&
+          entry.wsMs <= windowStartMs &&
+          entry.weMs >= windowEndMs;
+
+        if (!okEntry) {
+          missingChannels.push(c);
+          continue;
+        }
+
+        const segs = Array.isArray(entry.scheduleSegments) ? entry.scheduleSegments : [];
+        const vids = Array.isArray(entry.videos) ? entry.videos : [];
+        for (const s of segs) scheduleSegments.push(s);
+        for (const v of vids) videos.push(v);
+      }
+
+      if (missingChannels.length) {
+        const fetchedSchedule = await fetchScheduleSegments({ selectedChannels: missingChannels, windowStartIso, windowEndIso });
+        const fetchedVideos = await fetchVideos({ selectedChannels: missingChannels, windowStartIso, windowEndIso });
+
+        const segsByChannel = new Map();
+        for (const s of fetchedSchedule) {
+          const cid = String(s?.channelId || '');
+          if (!cid) continue;
+          if (!segsByChannel.has(cid)) segsByChannel.set(cid, []);
+          segsByChannel.get(cid).push(s);
+          scheduleSegments.push(s);
+        }
+
+        const vidsByChannel = new Map();
+        for (const v of fetchedVideos) {
+          const cid = String(v?.channelId || '');
+          if (!cid) continue;
+          if (!vidsByChannel.has(cid)) vidsByChannel.set(cid, []);
+          vidsByChannel.get(cid).push(v);
+          videos.push(v);
+        }
+
+        for (const c of missingChannels) {
+          channelCache[c.id] = {
+            ts: now,
+            wsMs: windowStartMs,
+            weMs: windowEndMs,
+            scheduleSegments: segsByChannel.get(c.id) || [],
+            videos: vidsByChannel.get(c.id) || [],
+          };
+        }
+
+        cacheV2.ts = now;
+        cacheV2.channels = channelCache;
+        saveCache(cacheV2);
+      }
 
       const data = {
         ok: true,
@@ -267,7 +368,11 @@ export function createStaticTimelineDataSource() {
         videos,
       };
 
-      saveCache({ key: cacheKey, ts: now, data });
+      cacheV2.key = cacheKey;
+      cacheV2.ts = now;
+      cacheV2.data = data;
+      cacheV2.channels = channelCache;
+      saveCache(cacheV2);
       return data;
 
     },

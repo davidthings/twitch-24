@@ -171,9 +171,13 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
 
   const [items, setItems] = useState([]);
   const itemsRef = useRef([]);
+  const baseItemsRef = useRef([]);
+  const previewCacheRef = useRef(new Map());
 
   const [hover, setHover] = useState(null);
   const hoverClearTimeoutRef = useRef(null);
+  const hoverPendingRef = useRef(null);
+  const hoverRafRef = useRef(0);
 
   function cancelHoverClear() {
     if (hoverClearTimeoutRef.current) {
@@ -187,6 +191,24 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     hoverClearTimeoutRef.current = setTimeout(() => {
       setHover(null);
     }, 80);
+  }
+
+  function scheduleHoverUpdate(next) {
+    hoverPendingRef.current = next;
+    if (hoverRafRef.current) return;
+
+    hoverRafRef.current = requestAnimationFrame(() => {
+      hoverRafRef.current = 0;
+      const pending = hoverPendingRef.current;
+      if (!pending) return;
+
+      setHover((prev) => {
+        if (!prev || !prev.item || !pending.item) return pending;
+        if (prev.item.id !== pending.item.id) return pending;
+        if (Math.abs((prev.x || 0) - (pending.x || 0)) < 1 && Math.abs((prev.y || 0) - (pending.y || 0)) < 1) return prev;
+        return pending;
+      });
+    });
   }
 
   function resolveDisplayTimeZoneForItem(item) {
@@ -950,7 +972,7 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
         const x = rect && clientX !== null ? clientX - rect.left : e.global.x;
         const y = rect && clientY !== null ? clientY - rect.top : e.global.y;
 
-        setHover({
+        scheduleHoverUpdate({
           item: it,
           x,
           y,
@@ -1016,11 +1038,8 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     });
   }
 
-  function applyTimelineJson(json) {
-    setChannels(json.channels || []);
-
+  function buildItemsFromTimelineJson(json) {
     const byId = new Map((json.channels || []).map((c) => [c.id, c]));
-
     const nextItems = [];
 
     for (const s of json.scheduleSegments || []) {
@@ -1061,7 +1080,14 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     }
 
     nextItems.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+    return nextItems;
+  }
 
+  function applyTimelineJson(json) {
+    setChannels(json.channels || []);
+
+    const nextItems = buildItemsFromTimelineJson(json);
+    baseItemsRef.current = nextItems;
     setItems(nextItems);
     itemsRef.current = nextItems;
   }
@@ -1321,70 +1347,20 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
 
     let cancelled = false;
 
-    const effectiveSelectedIds = (() => {
-      if (selectedChannelIds === null) return null;
-      const base = Array.isArray(selectedChannelIds) ? selectedChannelIds : [];
-      const id = String(previewChannelId || '').trim();
-      if (!id) return base;
-      if (base.includes(id)) return base;
-      return [...base, id];
-    })();
-
     (async () => {
       try {
         const json = await loadTimelineData({
           originMs: originTargetMs,
           past: pastDays,
           future: futureDays,
-          selectedIds: effectiveSelectedIds,
+          selectedIds: selectedChannelIds,
         });
         if (cancelled) return;
 
         setChannels(json.channels || []);
 
-        const byId = new Map((json.channels || []).map((c) => [c.id, c]));
-
-        const nextItems = [];
-
-        for (const s of json.scheduleSegments || []) {
-          const st = s.startTimeIso ? new Date(s.startTimeIso).getTime() : NaN;
-          const en = s.endTimeIso ? new Date(s.endTimeIso).getTime() : NaN;
-          const c = byId.get(s.channelId);
-          nextItems.push({
-            id: `sched_${s.id}`,
-            kind: 'scheduled',
-            channelId: s.channelId,
-            channelLogin: c?.login || '',
-            channelTimeZone: c?.timeZone || null,
-            title: s.title || '',
-            startMs: st,
-            endMs: en,
-            isCanceled: Boolean(s.isCanceled),
-            url: null,
-          });
-        }
-
-        for (const v of json.videos || []) {
-          const st = v.startedAtIso ? new Date(v.startedAtIso).getTime() : NaN;
-          const en = v.endedAtIso ? new Date(v.endedAtIso).getTime() : NaN;
-          const c = byId.get(v.channelId);
-          nextItems.push({
-            id: `vid_${v.id}`,
-            kind: 'video',
-            channelId: v.channelId,
-            channelLogin: c?.login || '',
-            channelTimeZone: c?.timeZone || null,
-            title: v.title || '',
-            startMs: st,
-            endMs: Number.isFinite(en) ? en : Number.isFinite(st) ? st : NaN,
-            isCanceled: false,
-            url: v.url || null,
-            viewCount: v.viewCount,
-          });
-        }
-
-        nextItems.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
-
+        const nextItems = buildItemsFromTimelineJson(json);
+        baseItemsRef.current = nextItems;
         setItems(nextItems);
         itemsRef.current = nextItems;
 
@@ -1398,7 +1374,67 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
     return () => {
       cancelled = true;
     };
-  }, [originTargetMs, pastDays, futureDays, selectedChannelIds, previewChannelId]);
+  }, [originTargetMs, pastDays, futureDays, selectedChannelIds]);
+
+  useEffect(() => {
+    const id = String(previewChannelId || '').trim();
+    if (!id) {
+      const base = baseItemsRef.current;
+      setItems(base);
+      itemsRef.current = base;
+      redrawTimeline();
+      requestRenderRef.current();
+      return;
+    }
+
+    const checked = selectedChannelIds === null ? true : Array.isArray(selectedChannelIds) ? selectedChannelIds.includes(id) : false;
+    if (checked) return;
+
+    const windowStartMs = Math.floor((originTargetMs - pastDays * dayMs) / dayMs) * dayMs;
+    const windowEndMs = Math.ceil((originTargetMs + futureDays * dayMs) / dayMs) * dayMs;
+    const cacheKey = `${id}|${windowStartMs}|${windowEndMs}`;
+    const cached = previewCacheRef.current.get(cacheKey);
+    const now = Date.now();
+
+    if (cached && typeof cached === 'object' && typeof cached.ts === 'number' && Array.isArray(cached.items) && now - cached.ts < 2 * 60 * 1000) {
+      const merged = [...baseItemsRef.current, ...cached.items].slice().sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+      setItems(merged);
+      itemsRef.current = merged;
+      redrawTimeline();
+      requestRenderRef.current();
+      return;
+    }
+
+    let cancelled = false;
+    const t = setTimeout(() => {
+      (async () => {
+        try {
+          const json = await loadTimelineData({
+            originMs: originTargetMs,
+            past: pastDays,
+            future: futureDays,
+            selectedIds: [id],
+          });
+          if (cancelled) return;
+
+          const previewItems = buildItemsFromTimelineJson(json);
+          previewCacheRef.current.set(cacheKey, { ts: Date.now(), items: previewItems });
+
+          const merged = [...baseItemsRef.current, ...previewItems].slice().sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+          setItems(merged);
+          itemsRef.current = merged;
+          redrawTimeline();
+          requestRenderRef.current();
+        } catch {
+        }
+      })();
+    }, 450);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [previewChannelId, originTargetMs, pastDays, futureDays, selectedChannelIds]);
 
   async function reorderChannel(channelId, direction) {
     if (!isAdmin) return;

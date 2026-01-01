@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card, Flex, Heading, Text } from '@radix-ui/themes';
 
 import PixiTimeline from '@/server-app/timeline/PixiTimeline';
@@ -17,6 +17,11 @@ function getSystemTimeZone() {
 export default function StaticTimelinePage() {
   const dataSource = useMemo(() => createStaticTimelineDataSource(), []);
   const tz = useMemo(() => getSystemTimeZone(), []);
+  const [nowMs, setNowMs] = useState(null);
+
+  useEffect(() => {
+    setNowMs(Date.now());
+  }, []);
 
   return (
     <Flex direction="column" gap="4">
@@ -29,7 +34,7 @@ export default function StaticTimelinePage() {
         </Flex>
       </Card>
 
-      <PixiTimeline userTimeZone={tz} initialNowMs={Date.now()} isAdmin={true} dataSource={dataSource} />
+      {typeof nowMs === 'number' ? <PixiTimeline userTimeZone={tz} initialNowMs={nowMs} isAdmin={true} dataSource={dataSource} /> : null}
     </Flex>
   );
 }
