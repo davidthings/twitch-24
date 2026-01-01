@@ -93,36 +93,57 @@ async function resolveBroadcasterIds(channels) {
 async function fetchScheduleSegments({ selectedChannels, windowStartIso, windowEndIso }) {
   const out = [];
 
+  const ws = new Date(windowStartIso).getTime();
+  const we = new Date(windowEndIso).getTime();
+
   await withConcurrency(selectedChannels, 4, async (c) => {
     if (!c.broadcasterId) return;
     try {
-      const json = await apiGet('/schedule', {
-        broadcaster_id: c.broadcasterId,
-        start_time: windowStartIso,
-        first: 100,
-      });
-      const segs = Array.isArray(json?.data?.segments) ? json.data.segments : [];
-      for (const s of segs) {
-        const start = String(s?.start_time || '');
-        const end = String(s?.end_time || '');
-        if (!start || !end) continue;
+      const windowStartMs = Number.isFinite(ws) ? ws : Date.now();
+      const startMs = Math.max(Date.now(), windowStartMs);
+      const startIso = new Date(startMs).toISOString();
 
-        // filter to window
-        const st = new Date(start).getTime();
-        const en = new Date(end).getTime();
-        const ws = new Date(windowStartIso).getTime();
-        const we = new Date(windowEndIso).getTime();
-        if (Number.isFinite(st) && st >= we) continue;
-        if (Number.isFinite(en) && en <= ws) continue;
-
-        out.push({
-          id: String(s?.id || ''),
-          channelId: c.id,
-          title: String(s?.title || ''),
-          startTimeIso: start,
-          endTimeIso: end,
-          isCanceled: Boolean(s?.canceled_until),
+      let cursor = null;
+      for (let page = 0; page < 20; page += 1) {
+        const json = await apiGet('/schedule', {
+          broadcaster_id: c.broadcasterId,
+          ...(cursor ? { after: cursor } : { start_time: startIso }),
+          first: 25,
         });
+
+        const segs = Array.isArray(json?.data?.segments) ? json.data.segments : [];
+        const nextCursor = String(json?.pagination?.cursor || '').trim() || null;
+
+        let maxStart = null;
+        for (const s of segs) {
+          const start = String(s?.start_time || '');
+          const end = String(s?.end_time || '');
+          if (!start || !end) continue;
+
+          const st = new Date(start).getTime();
+          const en = new Date(end).getTime();
+
+          if (Number.isFinite(st)) {
+            maxStart = maxStart === null ? st : Math.max(maxStart, st);
+          }
+
+          if (Number.isFinite(st) && Number.isFinite(we) && st >= we) continue;
+          if (Number.isFinite(en) && Number.isFinite(ws) && en <= ws) continue;
+
+          out.push({
+            id: String(s?.id || ''),
+            channelId: c.id,
+            title: String(s?.title || ''),
+            startTimeIso: start,
+            endTimeIso: end,
+            isCanceled: Boolean(s?.canceled_until),
+          });
+        }
+
+        if (!nextCursor) break;
+        if (!segs.length) break;
+        if (maxStart !== null && Number.isFinite(we) && maxStart >= we) break;
+        cursor = nextCursor;
       }
     } catch {
       // If schedule requires extra scopes or isn't available, just skip it.

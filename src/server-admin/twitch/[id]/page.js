@@ -6,7 +6,7 @@ import { authOptions } from '@/lib/auth';
 import { formatInTimeZone } from '@/lib/datetime';
 import { prisma } from '@/lib/prisma';
 
-import TimeZonePicker from '@/app/app/settings/TimeZonePicker';
+import TimeZonePicker from '@/server-app/settings/TimeZonePicker';
 
 async function requireAdmin() {
   const session = await getServerSession(authOptions);
@@ -315,6 +315,9 @@ export default async function AdminTwitchChannelPage({ params }) {
               initialTimeZone={channel.timeZone || viewerTz}
               fieldName="timeZone"
               recentsStorageKey={`t24_recent_channel_time_zones_v1`}
+              variant="chip"
+              label="Time zone"
+              placeholder="Type to filter…"
             />
             <Button type="submit">Save</Button>
           </Flex>

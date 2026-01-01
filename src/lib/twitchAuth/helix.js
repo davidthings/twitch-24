@@ -87,7 +87,39 @@ export async function apiGet(path, query = {}) {
   });
 
   if (!res.ok) {
-    const txt = await res.text().catch(() => '');
+    const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+    const isJson = contentType.includes('application/json');
+    const bodyJson = isJson ? await res.json().catch(() => null) : null;
+    const bodyText = !isJson ? await res.text().catch(() => '') : '';
+
+    // Special-case: Helix returns 404 with message "segments were not found" when a broadcaster
+    // has no schedule configured. Treat as empty schedule rather than an error.
+    if (
+      path === '/schedule' &&
+      res.status === 404 &&
+      bodyJson &&
+      typeof bodyJson === 'object' &&
+      String(bodyJson.message || '').toLowerCase().includes('segments were not found')
+    ) {
+      const normalized = {
+        data: { segments: [] },
+        pagination: {},
+        _meta: { empty: true, originalError: bodyJson },
+      };
+      logHelixCall({
+        path,
+        query,
+        url: url.toString(),
+        ok: true,
+        status: res.status,
+        durationMs: Date.now() - startedAt,
+        errorText: null,
+        responseJson: normalized,
+      });
+      return normalized;
+    }
+
+    const errorText = bodyText || (bodyJson ? JSON.stringify(bodyJson) : '');
     logHelixCall({
       path,
       query,
@@ -95,10 +127,10 @@ export async function apiGet(path, query = {}) {
       ok: false,
       status: res.status,
       durationMs: Date.now() - startedAt,
-      errorText: txt,
-      responseJson: null,
+      errorText,
+      responseJson: bodyJson && typeof bodyJson === 'object' ? bodyJson : null,
     });
-    throw new Error(`Helix ${path} failed: ${res.status} ${txt}`);
+    throw new Error(`Helix ${path} failed: ${res.status} ${errorText}`);
   }
 
   const json = await res.json();

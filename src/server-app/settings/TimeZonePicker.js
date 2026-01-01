@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Flex, Text } from '@radix-ui/themes';
+import { Button, Card, Flex, Text } from '@radix-ui/themes';
 
 function loadRecents(storageKey) {
   if (typeof window === 'undefined') return [];
@@ -46,6 +46,8 @@ export default function TimeZonePicker({
   fieldName = 'timeZone',
   recentsStorageKey = 't24_recent_time_zones_v1',
   variant = 'default',
+  label,
+  placeholder,
   onChange,
 }) {
   const [timeZone, setTimeZone] = useState(initialTimeZone || 'UTC');
@@ -54,6 +56,8 @@ export default function TimeZonePicker({
   const [recents, setRecents] = useState([]);
   const [tzList, setTzList] = useState([]);
   const inputRef = useRef(null);
+  const chipRef = useRef(null);
+  const [systemTz, setSystemTz] = useState('');
 
   useEffect(() => {
     setRecents(loadRecents(recentsStorageKey));
@@ -86,6 +90,13 @@ export default function TimeZonePicker({
     }
 
     setTzList(list);
+
+    try {
+      const sys = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (sys) setSystemTz(sys);
+    } catch {
+      // ignore
+    }
   }, []);
 
   useEffect(() => {
@@ -100,6 +111,36 @@ export default function TimeZonePicker({
     }, 0);
     return () => clearTimeout(id);
   }, [editing]);
+
+  useEffect(() => {
+    if (!editing) return;
+    if (variant !== 'chip') return;
+
+    function onKeyDown(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setEditing(false);
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [editing, variant]);
+
+  useEffect(() => {
+    if (!editing) return;
+    if (variant !== 'chip') return;
+
+    function onDocMouseDown(e) {
+      const el = chipRef.current;
+      if (!el) return;
+      if (e.target instanceof Node && el.contains(e.target)) return;
+      setEditing(false);
+    }
+
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [editing, variant]);
 
   const tzAliases = useMemo(
     () => ({
@@ -234,12 +275,105 @@ export default function TimeZonePicker({
   }
 
   const isCompact = variant === 'compact';
+  const isChip = variant === 'chip';
+
+  const quickOptions = useMemo(() => {
+    const out = [];
+    if (systemTz) out.push(systemTz);
+    out.push('UTC');
+    for (const r of recents) {
+      if (typeof r !== 'string') continue;
+      if (!out.includes(r)) out.push(r);
+    }
+    return out.slice(0, 8);
+  }, [recents, systemTz]);
 
   return (
     <Flex direction="column" gap="2">
       <input type="hidden" name={fieldName} value={timeZone} />
 
-      {!editing ? (
+      {isChip ? (
+        <div ref={chipRef} style={{ position: 'relative', display: 'inline-block', width: '100%' }}>
+          <Flex direction="column" gap="1" style={{ width: '100%' }}>
+            {label ? (
+              <Text size="2" color="gray">
+                {label}
+              </Text>
+            ) : null}
+
+            <Button
+              type="button"
+              size="1"
+              variant={timeZone ? 'solid' : 'soft'}
+              onClick={() => setEditing((v) => !v)}
+              style={{ justifyContent: 'flex-start', width: '100%' }}
+            >
+              {timeZone || 'Select time zone'}
+            </Button>
+          </Flex>
+
+          {editing ? (
+            <Card style={{ position: 'absolute', zIndex: 50, top: '100%', left: 0, marginTop: 10, width: 420, maxWidth: '100%' }}>
+              <Flex direction="column" gap="2">
+                <input
+                  ref={inputRef}
+                  value={tzInput}
+                  onChange={(e) => setTzInput(e.target.value)}
+                  placeholder={placeholder || 'Type to filter…'}
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    border: '1px solid rgba(255,255,255,0.18)',
+                    background: 'rgba(255,255,255,0.06)',
+                    color: 'inherit',
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      applyFromInput();
+                    }
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setEditing(false);
+                    }
+                  }}
+                />
+
+                {quickOptions.length ? (
+                  <Flex gap="2" wrap="wrap">
+                    {quickOptions.map((z) => (
+                      <Button key={`q_${z}`} type="button" size="1" variant="soft" onClick={() => applyTimeZone(z)}>
+                        {z}
+                      </Button>
+                    ))}
+                  </Flex>
+                ) : null}
+
+                {suggestions.length ? (
+                  <Flex gap="2" wrap="wrap">
+                    {suggestions.map((z) => (
+                      <Button key={z} type="button" size="1" variant="soft" onClick={() => applyTimeZone(z)}>
+                        {z}
+                      </Button>
+                    ))}
+                  </Flex>
+                ) : tzInput.trim() ? (
+                  <Text size="2" color="gray">
+                    No matches
+                  </Text>
+                ) : null}
+
+                <Text size="2" color="gray" style={{ overflowWrap: 'anywhere' }}>
+                  {preview}
+                </Text>
+              </Flex>
+            </Card>
+          ) : null}
+        </div>
+      ) : null}
+
+      {!isChip && !editing ? (
         isCompact ? (
           <Flex direction="column" gap="1">
             <Flex gap="2" align="center" wrap="wrap">
@@ -280,7 +414,7 @@ export default function TimeZonePicker({
             </Text>
           </Flex>
         )
-      ) : (
+      ) : !isChip ? (
         <Flex direction="column" gap="2">
           <Flex gap="2" align="center" wrap="wrap">
             <input
@@ -358,7 +492,7 @@ export default function TimeZonePicker({
             </div>
           ) : null}
         </Flex>
-      )}
+      ) : null}
     </Flex>
   );
 }

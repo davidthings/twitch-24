@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, Card, Flex, Heading, Text } from '@radix-ui/themes';
 
 const HELIX_LOG_KEY = 't24_helix_latest_v1';
+const CACHE_KEYS = ['t24_channel_discovery_cache_v1', 't24_static_timeline_cache_v1'];
 
 function safeParseJson(text) {
   try {
@@ -40,13 +41,24 @@ function summarizeResponse(resp) {
 export default function TwitchDebugPage() {
   const [log, setLog] = useState(null);
   const [selectedPath, setSelectedPath] = useState('');
+  const selectedPathRef = useRef('');
+  const [cacheStatus, setCacheStatus] = useState('');
 
   function refresh() {
     const next = readLog();
     setLog(next);
-    if (!selectedPath) {
-      const first = next && next.byPath ? Object.keys(next.byPath).sort()[0] : '';
-      if (first) setSelectedPath(first);
+
+    const byPath = next && next.byPath ? next.byPath : null;
+    const paths = byPath ? Object.keys(byPath) : [];
+    const current = selectedPathRef.current;
+    const hasCurrent = current && paths.includes(current);
+
+    if (!hasCurrent) {
+      const first = paths.sort()[0] || '';
+      if (first) {
+        selectedPathRef.current = first;
+        setSelectedPath(first);
+      }
     }
   }
 
@@ -56,6 +68,10 @@ export default function TwitchDebugPage() {
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    selectedPathRef.current = selectedPath;
+  }, [selectedPath]);
 
   const paths = log && log.byPath ? Object.keys(log.byPath).sort() : [];
   const entry = selectedPath && log && log.byPath ? log.byPath[selectedPath] : null;
@@ -69,9 +85,36 @@ export default function TwitchDebugPage() {
           <Text size="2" color="gray">
             Shows the latest request/response per Helix endpoint (client-side log). Useful for validating filters.
           </Text>
+          {cacheStatus ? (
+            <Text size="2" color="gray">
+              {cacheStatus}
+            </Text>
+          ) : null}
           <Flex gap="2" wrap="wrap" align="center">
             <Button type="button" variant="soft" onClick={refresh}>
               Refresh
+            </Button>
+            <Button
+              type="button"
+              variant="soft"
+              color="red"
+              onClick={() => {
+                let cleared = 0;
+                try {
+                  for (const k of CACHE_KEYS) {
+                    try {
+                      const had = window.localStorage.getItem(k) !== null;
+                      window.localStorage.removeItem(k);
+                      if (had) cleared += 1;
+                    } catch {
+                    }
+                  }
+                } catch {
+                }
+                setCacheStatus(`Cleared ${cleared} cache key(s)`);
+              }}
+            >
+              Clear caches
             </Button>
             <Button
               type="button"
@@ -83,7 +126,9 @@ export default function TwitchDebugPage() {
                 } catch {
                 }
                 setLog(null);
+                selectedPathRef.current = '';
                 setSelectedPath('');
+                setCacheStatus('');
               }}
             >
               Clear log
@@ -103,7 +148,10 @@ export default function TwitchDebugPage() {
                     key={p}
                     type="button"
                     variant={p === selectedPath ? 'solid' : 'soft'}
-                    onClick={() => setSelectedPath(p)}
+                    onClick={() => {
+                      selectedPathRef.current = p;
+                      setSelectedPath(p);
+                    }}
                   >
                     {p}
                   </Button>

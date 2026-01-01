@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Flex, Text } from '@radix-ui/themes';
 
-import TimeZonePicker from '@/app/app/settings/TimeZonePicker';
+import TimeZonePicker from '@/server-app/settings/TimeZonePicker';
 
 function formatInTimeZoneClient(dateIso, timeZone) {
   const d = new Date(dateIso);
@@ -116,6 +116,9 @@ export default function ScheduleClient({
             initialTimeZone={customTz}
             fieldName="__ignored"
             recentsStorageKey="t24_recent_schedule_custom_time_zones_v1"
+            variant="chip"
+            label="Time zone"
+            placeholder="Type to filter…"
             onChange={(tz) => setCustomTz(tz)}
           />
         ) : null}

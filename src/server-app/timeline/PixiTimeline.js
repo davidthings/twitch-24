@@ -1609,7 +1609,9 @@ export default function PixiTimeline({ userTimeZone, initialNowMs, isAdmin, data
                 initialTimeZone={customTimeZone || userTimeZone || 'UTC'}
                 fieldName="__ignored"
                 recentsStorageKey="t24_recent_timeline_custom_time_zones_v1"
-                variant="compact"
+                variant="chip"
+                label="Time zone"
+                placeholder="Type to filter…"
                 onChange={(tz) => setCustomTimeZone(tz)}
               />
             ) : null}

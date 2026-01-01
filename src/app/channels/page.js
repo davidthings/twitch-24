@@ -8,19 +8,47 @@ import { apiGet } from '@/lib/twitchAuth/helix';
 import { toPath } from '@/lib/twitchAuth/oauth';
 import { clearToken } from '@/lib/twitchAuth/tokenStorage';
 import { useTwitchAuth } from '@/lib/twitchAuth/useTwitchAuth';
+import TimeZonePicker from '@/server-app/settings/TimeZonePicker';
 
 function normalizeLogin(s) {
   return String(s || '').trim().toLowerCase();
 }
 
-function makeNewChannel({ login, displayName, broadcasterId }) {
+const DEFAULT_CHANNEL_COLORS = ['#60a5fa', '#a78bfa', '#34d399', '#fbbf24', '#f87171', '#22c55e', '#38bdf8', '#fb7185', '#f97316', '#94a3b8'];
+
+function hashStringToIndex(str, mod) {
+  const s = String(str || '');
+  let hash = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+  }
+  return mod ? hash % mod : hash;
+}
+
+function pickDefaultChannelColorHex(existingChannels, seed) {
+  const used = new Set(
+    (Array.isArray(existingChannels) ? existingChannels : [])
+      .map((c) => String(c?.colorHex || '').toLowerCase().trim())
+      .filter((x) => x.match(/^#[0-9a-f]{6}$/))
+  );
+
+  const base = String(seed || '').trim() || 'seed';
+  const startIdx = hashStringToIndex(base, DEFAULT_CHANNEL_COLORS.length);
+  for (let i = 0; i < DEFAULT_CHANNEL_COLORS.length; i += 1) {
+    const hex = DEFAULT_CHANNEL_COLORS[(startIdx + i) % DEFAULT_CHANNEL_COLORS.length];
+    if (!used.has(hex)) return hex;
+  }
+  return DEFAULT_CHANNEL_COLORS[startIdx];
+}
+
+function makeNewChannel({ login, displayName, broadcasterId, colorHex }) {
   const l = normalizeLogin(login);
   return {
     id: l || `ch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
     login: l,
     displayName: String(displayName || '').trim() || l,
     broadcasterId: String(broadcasterId || '').trim() || null,
-    colorHex: null,
+    colorHex: String(colorHex || '').trim().toLowerCase() || null,
     timeZone: null,
     isEnabled: true,
     sortOrder: 0,
@@ -53,6 +81,52 @@ function parseTwitchDurationToMs(s) {
   const sec = Number(m[3] || 0);
   if (![h, min, sec].every((x) => Number.isFinite(x) && x >= 0)) return 0;
   return (h * 60 * 60 + min * 60 + sec) * 1000;
+}
+
+function parseTimeOfDayToMinutes(s) {
+  const t = String(s || '').trim();
+  if (!t) return null;
+  const m = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (![hh, mm].every((x) => Number.isFinite(x))) return null;
+  if (hh < 0 || hh > 23) return null;
+  if (mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
+function minutesInRange(mins, start, end) {
+  if (![mins, start, end].every((x) => Number.isFinite(x))) return false;
+  if (start === end) return true;
+  if (start < end) return mins >= start && mins <= end;
+  return mins >= start || mins <= end;
+}
+
+function localMinutesOfDayFromMs(ms) {
+  const d = new Date(ms);
+  const t = d.getTime();
+  if (!Number.isFinite(t)) return null;
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+function minutesOfDayInTimeZone(ms, timeZone) {
+  const tz = String(timeZone || '').trim();
+  if (!tz) return localMinutesOfDayFromMs(ms);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date(ms));
+    const hh = Number(parts.find((p) => p.type === 'hour')?.value || NaN);
+    const mm = Number(parts.find((p) => p.type === 'minute')?.value || NaN);
+    if (![hh, mm].every((x) => Number.isFinite(x))) return null;
+    return hh * 60 + mm;
+  } catch {
+    return localMinutesOfDayFromMs(ms);
+  }
 }
 
 function asFiniteNumber(v, fallback = 0) {
@@ -111,6 +185,144 @@ function saveDiscoveryCache(cacheKey, data) {
   }
 }
 
+const VIDEO_TYPE_OPTIONS = [
+  { id: 'archive', name: 'VOD (Archive)' },
+  { id: 'highlight', name: 'Highlight' },
+  { id: 'upload', name: 'Upload' },
+  { id: 'all', name: 'All' },
+];
+
+const LANGUAGE_OPTIONS = [
+  { id: 'en', name: 'English' },
+  { id: 'es', name: 'Spanish' },
+  { id: 'fr', name: 'French' },
+  { id: 'de', name: 'German' },
+  { id: 'pt', name: 'Portuguese' },
+  { id: 'it', name: 'Italian' },
+  { id: 'ja', name: 'Japanese' },
+  { id: 'ko', name: 'Korean' },
+  { id: 'ru', name: 'Russian' },
+  { id: 'tr', name: 'Turkish' },
+  { id: 'zh', name: 'Chinese' },
+  { id: 'any', name: 'Any' },
+];
+
+function CompactChipPicker({
+  label,
+  placeholder,
+  valueLabel,
+  isOpen,
+  onOpen,
+  onClose,
+  query,
+  setQuery,
+  options,
+  onSelect,
+  recents,
+}) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    function onKeyDown(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, onClose]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    function onDocMouseDown(e) {
+      const el = ref.current;
+      if (!el) return;
+      if (e.target instanceof Node && el.contains(e.target)) return;
+      onClose();
+    }
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [isOpen, onClose]);
+
+  return (
+    <div ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+      <Flex direction="column" gap="1">
+        <Text size="2" color="gray">
+          {label}
+        </Text>
+        <Button
+          type="button"
+          size="1"
+          variant={valueLabel ? 'solid' : 'soft'}
+          onClick={() => {
+            if (isOpen) onClose();
+            else onOpen();
+          }}
+          style={{ justifyContent: 'flex-start' }}
+        >
+          {valueLabel || placeholder}
+        </Button>
+      </Flex>
+
+      {isOpen ? (
+        <Card style={{ position: 'absolute', zIndex: 50, top: '100%', left: 0, marginTop: 10, width: 320 }}>
+          <Flex direction="column" gap="2">
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Type to filter…"
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: '1px solid rgba(255,255,255,0.18)',
+                background: 'rgba(255,255,255,0.06)',
+                color: 'inherit',
+              }}
+            />
+
+            {Array.isArray(recents) && recents.length ? (
+              <Flex gap="2" wrap="wrap">
+                {recents.map((r) => (
+                  <Button key={`recent_${r.id}`} type="button" size="1" variant="soft" onClick={() => onSelect(r)}>
+                    {r.name}
+                  </Button>
+                ))}
+              </Flex>
+            ) : null}
+
+            {Array.isArray(options) && options.length ? (
+              <Flex gap="2" wrap="wrap">
+                {options.map((o) => (
+                  <Button
+                    key={o.id}
+                    type="button"
+                    size="1"
+                    variant="soft"
+                    onClick={() => {
+                      onSelect(o);
+                      onClose();
+                    }}
+                  >
+                    {o.name}
+                  </Button>
+                ))}
+              </Flex>
+            ) : (
+              <Text size="2" color="gray">
+                No matches
+              </Text>
+            )}
+          </Flex>
+        </Card>
+      ) : null}
+    </div>
+  );
+}
+
 export default function StaticChannelsPage() {
   const auth = useTwitchAuth();
   const [channels, setChannels] = useState([]);
@@ -123,10 +335,31 @@ export default function StaticChannelsPage() {
   const [gameOptions, setGameOptions] = useState([]);
   const [selectedGame, setSelectedGame] = useState(null);
   const [recentGames, setRecentGames] = useState([]);
+
+  const [videoTypeQuery, setVideoTypeQuery] = useState('');
+  const [selectedVideoType, setSelectedVideoType] = useState(VIDEO_TYPE_OPTIONS[0]);
+  const [recentVideoTypes, setRecentVideoTypes] = useState([]);
+
+  const [languageQuery, setLanguageQuery] = useState('');
+  const [selectedLanguage, setSelectedLanguage] = useState(LANGUAGE_OPTIONS[0]);
+  const [recentLanguages, setRecentLanguages] = useState([]);
+
+  const [activePicker, setActivePicker] = useState(null);
+
   const [startAt, setStartAt] = useState('');
   const [endAt, setEndAt] = useState('');
   const [endStartAt, setEndStartAt] = useState('');
   const [endEndAt, setEndEndAt] = useState('');
+
+  const [startTodEnabled, setStartTodEnabled] = useState(false);
+  const [startTodFrom, setStartTodFrom] = useState('10:00');
+  const [startTodTo, setStartTodTo] = useState('11:00');
+  const [startTodTimeZone, setStartTodTimeZone] = useState('');
+  const [endTodEnabled, setEndTodEnabled] = useState(false);
+  const [endTodFrom, setEndTodFrom] = useState('16:00');
+  const [endTodTo, setEndTodTo] = useState('19:00');
+  const [endTodTimeZone, setEndTodTimeZone] = useState('');
+
   const [minViewCount, setMinViewCount] = useState('1000');
   const [hideExisting, setHideExisting] = useState(true);
   const [sortBy, setSortBy] = useState('maxViewCount');
@@ -134,6 +367,7 @@ export default function StaticChannelsPage() {
   const [discoverStatus, setDiscoverStatus] = useState('');
   const [discoverLoading, setDiscoverLoading] = useState(false);
   const [discoverResults, setDiscoverResults] = useState([]);
+  const [discoverVods, setDiscoverVods] = useState([]);
 
   const loadedRef = useRef(false);
 
@@ -149,6 +383,11 @@ export default function StaticChannelsPage() {
     if (saved) {
       const sg = saved.selectedGame && typeof saved.selectedGame === 'object' ? saved.selectedGame : null;
       const rg = Array.isArray(saved.recentGames) ? saved.recentGames : [];
+      const svt = saved.selectedVideoType && typeof saved.selectedVideoType === 'object' ? saved.selectedVideoType : null;
+      const rvt = Array.isArray(saved.recentVideoTypes) ? saved.recentVideoTypes : [];
+      const sl = saved.selectedLanguage && typeof saved.selectedLanguage === 'object' ? saved.selectedLanguage : null;
+      const rl = Array.isArray(saved.recentLanguages) ? saved.recentLanguages : [];
+
       if (sg && sg.id && sg.name) setSelectedGame({ id: String(sg.id), name: String(sg.name), boxArtUrl: String(sg.boxArtUrl || '') });
       setRecentGames(
         rg
@@ -156,11 +395,40 @@ export default function StaticChannelsPage() {
           .filter((g) => g.id && g.name)
           .slice(0, 12)
       );
+
+      if (svt && svt.id && svt.name) setSelectedVideoType({ id: String(svt.id), name: String(svt.name) });
+      setRecentVideoTypes(
+        rvt
+          .map((t) => ({ id: String(t?.id || ''), name: String(t?.name || '') }))
+          .filter((t) => t.id && t.name)
+          .slice(0, 12)
+      );
+
+      if (sl && sl.id && sl.name) setSelectedLanguage({ id: String(sl.id), name: String(sl.name) });
+      setRecentLanguages(
+        rl
+          .map((l) => ({ id: String(l?.id || ''), name: String(l?.name || '') }))
+          .filter((l) => l.id && l.name)
+          .slice(0, 12)
+      );
+
       if (typeof saved.gameQuery === 'string') setGameQuery(saved.gameQuery);
+      if (typeof saved.videoTypeQuery === 'string') setVideoTypeQuery(saved.videoTypeQuery);
+      if (typeof saved.languageQuery === 'string') setLanguageQuery(saved.languageQuery);
       if (typeof saved.startAt === 'string') setStartAt(saved.startAt);
       if (typeof saved.endAt === 'string') setEndAt(saved.endAt);
       if (typeof saved.endStartAt === 'string') setEndStartAt(saved.endStartAt);
       if (typeof saved.endEndAt === 'string') setEndEndAt(saved.endEndAt);
+
+      if (typeof saved.startTodEnabled === 'boolean') setStartTodEnabled(saved.startTodEnabled);
+      if (typeof saved.startTodFrom === 'string') setStartTodFrom(saved.startTodFrom);
+      if (typeof saved.startTodTo === 'string') setStartTodTo(saved.startTodTo);
+      if (typeof saved.startTodTimeZone === 'string') setStartTodTimeZone(saved.startTodTimeZone);
+      if (typeof saved.endTodEnabled === 'boolean') setEndTodEnabled(saved.endTodEnabled);
+      if (typeof saved.endTodFrom === 'string') setEndTodFrom(saved.endTodFrom);
+      if (typeof saved.endTodTo === 'string') setEndTodTo(saved.endTodTo);
+      if (typeof saved.endTodTimeZone === 'string') setEndTodTimeZone(saved.endTodTimeZone);
+
       if (saved.minViewCount !== undefined) setMinViewCount(String(saved.minViewCount));
       if (typeof saved.hideExisting === 'boolean') setHideExisting(saved.hideExisting);
       if (typeof saved.sortBy === 'string') setSortBy(saved.sortBy);
@@ -169,6 +437,17 @@ export default function StaticChannelsPage() {
       const now = Date.now();
       setEndAt(formatDateTimeLocalValue(now));
       setStartAt(formatDateTimeLocalValue(now - 7 * 24 * 60 * 60 * 1000));
+      setSelectedVideoType(VIDEO_TYPE_OPTIONS[0]);
+      setSelectedLanguage(LANGUAGE_OPTIONS[0]);
+    }
+
+    try {
+      const sys = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (sys) {
+        setStartTodTimeZone((prev) => (prev ? prev : sys));
+        setEndTodTimeZone((prev) => (prev ? prev : sys));
+      }
+    } catch {
     }
   }, []);
 
@@ -180,10 +459,24 @@ export default function StaticChannelsPage() {
         selectedGame,
         recentGames,
         gameQuery,
+        selectedVideoType,
+        recentVideoTypes,
+        videoTypeQuery,
+        selectedLanguage,
+        recentLanguages,
+        languageQuery,
         startAt,
         endAt,
         endStartAt,
         endEndAt,
+        startTodEnabled,
+        startTodFrom,
+        startTodTo,
+        startTodTimeZone,
+        endTodEnabled,
+        endTodFrom,
+        endTodTo,
+        endTodTimeZone,
         minViewCount,
         hideExisting,
         sortBy,
@@ -194,7 +487,121 @@ export default function StaticChannelsPage() {
     return () => {
       if (timeout) clearTimeout(timeout);
     };
-  }, [selectedGame, recentGames, gameQuery, startAt, endAt, endStartAt, endEndAt, minViewCount, hideExisting, sortBy, sortDir]);
+  }, [
+    selectedGame,
+    recentGames,
+    gameQuery,
+    selectedVideoType,
+    recentVideoTypes,
+    videoTypeQuery,
+    selectedLanguage,
+    recentLanguages,
+    languageQuery,
+    startAt,
+    endAt,
+    endStartAt,
+    endEndAt,
+    startTodEnabled,
+    startTodFrom,
+    startTodTo,
+    startTodTimeZone,
+    endTodEnabled,
+    endTodFrom,
+    endTodTo,
+    endTodTimeZone,
+    minViewCount,
+    hideExisting,
+    sortBy,
+    sortDir,
+  ]);
+
+  useEffect(() => {
+    const vods = Array.isArray(discoverVods) ? discoverVods : [];
+
+    const startFromMin = parseTimeOfDayToMinutes(startTodFrom);
+    const startToMin = parseTimeOfDayToMinutes(startTodTo);
+    const endFromMin = parseTimeOfDayToMinutes(endTodFrom);
+    const endToMin = parseTimeOfDayToMinutes(endTodTo);
+
+    const channelByUserId = new Map();
+
+    for (const v of vods) {
+      if (!v) continue;
+
+      if (startTodEnabled && startFromMin !== null && startToMin !== null) {
+        const st = minutesOfDayInTimeZone(v.createdAtMs, startTodTimeZone);
+        if (st === null) continue;
+        if (!minutesInRange(st, startFromMin, startToMin)) continue;
+      }
+
+      if (endTodEnabled && endFromMin !== null && endToMin !== null) {
+        const en = minutesOfDayInTimeZone(v.endAtMs, endTodTimeZone);
+        if (en === null) continue;
+        if (!minutesInRange(en, endFromMin, endToMin)) continue;
+      }
+
+      const userId = String(v.userId || '').trim();
+      const login = normalizeLogin(v.userLogin);
+      const displayName = String(v.userName || '').trim();
+      const viewCount = asFiniteNumber(v.viewCount, 0);
+
+      if (!userId || !login) continue;
+
+      const createdAtMs = asFiniteNumber(v.createdAtMs, 0);
+      const endAtMs = asFiniteNumber(v.endAtMs, 0);
+
+      const prev = channelByUserId.get(userId) || {
+        userId,
+        login,
+        displayName: displayName || login,
+        latestVodAtMs: createdAtMs,
+        latestVodEndAtMs: endAtMs,
+        vodCount: 0,
+        totalViewCount: 0,
+        maxViewCount: 0,
+        sampleVodUrl: String(v.url || '').trim() || null,
+        sampleVodTitle: String(v.title || '').trim() || null,
+        sampleVodViewCount: viewCount,
+      };
+
+      prev.vodCount += 1;
+      prev.totalViewCount += viewCount;
+      if (viewCount > (prev.maxViewCount || 0)) {
+        prev.maxViewCount = viewCount;
+        prev.sampleVodUrl = String(v.url || '').trim() || prev.sampleVodUrl;
+        prev.sampleVodTitle = String(v.title || '').trim() || prev.sampleVodTitle;
+        prev.sampleVodViewCount = viewCount;
+      }
+
+      if (!prev.latestVodAtMs || createdAtMs > prev.latestVodAtMs) {
+        prev.latestVodAtMs = createdAtMs;
+        prev.latestVodEndAtMs = endAtMs;
+      }
+      if (!prev.sampleVodUrl) prev.sampleVodUrl = String(v.url || '').trim() || null;
+      if (!prev.sampleVodTitle) prev.sampleVodTitle = String(v.title || '').trim() || null;
+      if (!prev.displayName || prev.displayName === prev.login) {
+        prev.displayName = displayName || prev.login;
+      }
+
+      channelByUserId.set(userId, prev);
+    }
+
+    const results = Array.from(channelByUserId.values())
+      .sort((a, b) => (asFiniteNumber(b.maxViewCount, 0) - asFiniteNumber(a.maxViewCount, 0)) || (asFiniteNumber(b.latestVodAtMs, 0) - asFiniteNumber(a.latestVodAtMs, 0)))
+      .slice(0, 200);
+
+    setDiscoverResults(results);
+  }, [
+    discoverVods,
+    startTodEnabled,
+    startTodFrom,
+    startTodTo,
+    startTodTimeZone,
+    endTodEnabled,
+    endTodFrom,
+    endTodTo,
+    endTodTimeZone,
+  ]);
 
   useEffect(() => {
     setExportText(exportChannelsJson(channels));
@@ -247,7 +654,8 @@ export default function StaticChannelsPage() {
       return;
     }
 
-    const next = [...channels, makeNewChannel({ login })].map((c, i) => ({ ...c, sortOrder: i }));
+    const nextColorHex = pickDefaultChannelColorHex(channels, login);
+    const next = [...channels, makeNewChannel({ login, colorHex: nextColorHex })].map((c, i) => ({ ...c, sortOrder: i }));
     persist(next);
     setNewLogin('');
     setStatus('');
@@ -321,19 +729,25 @@ export default function StaticChannelsPage() {
       endMs,
       endStartMs: Number.isFinite(endStartMs) ? endStartMs : null,
       endEndMs: Number.isFinite(endEndMs) ? endEndMs : null,
-      language: 'en',
-      type: 'archive',
+      language: selectedLanguage?.id === 'any' ? null : String(selectedLanguage?.id || '').trim() || null,
+      type: String(selectedVideoType?.id || '').trim() || null,
     });
     const cached = loadDiscoveryCache(cacheKey);
+    if (cached && typeof cached === 'object' && Array.isArray(cached.vods)) {
+      setDiscoverVods(cached.vods);
+      setDiscoverStatus('Loaded cached VODs');
+      return;
+    }
     if (cached && Array.isArray(cached)) {
       setDiscoverResults(cached);
+      setDiscoverVods([]);
       setDiscoverStatus('Loaded cached results');
       return;
     }
 
     setDiscoverLoading(true);
     try {
-      const channelByUserId = new Map();
+      const fetchedVods = [];
       let cursor = null;
       let reachedPastStart = false;
 
@@ -341,8 +755,8 @@ export default function StaticChannelsPage() {
         const json = await apiGet('/videos', {
           game_id: gameId,
           first: 100,
-          type: 'archive',
-          language: 'en',
+          ...(selectedVideoType?.id ? { type: selectedVideoType.id } : {}),
+          ...(selectedLanguage?.id && selectedLanguage.id !== 'any' ? { language: selectedLanguage.id } : {}),
           sort: 'time',
           ...(cursor ? { after: cursor } : {}),
         });
@@ -376,40 +790,16 @@ export default function StaticChannelsPage() {
           const viewCount = asFiniteNumber(v?.view_count, 0);
           if (!userId || !login) continue;
 
-          const prev = channelByUserId.get(userId) || {
+          fetchedVods.push({
             userId,
-            login,
-            displayName: displayName || login,
-            latestVodAtMs: createdAtMs,
-            latestVodEndAtMs: endAtMs,
-            vodCount: 0,
-            totalViewCount: 0,
-            maxViewCount: 0,
-            sampleVodUrl: String(v?.url || '').trim() || null,
-            sampleVodTitle: String(v?.title || '').trim() || null,
-            sampleVodViewCount: viewCount,
-          };
-
-          prev.vodCount += 1;
-          prev.totalViewCount += viewCount;
-          if (viewCount > (prev.maxViewCount || 0)) {
-            prev.maxViewCount = viewCount;
-            prev.sampleVodUrl = String(v?.url || '').trim() || prev.sampleVodUrl;
-            prev.sampleVodTitle = String(v?.title || '').trim() || prev.sampleVodTitle;
-            prev.sampleVodViewCount = viewCount;
-          }
-
-          if (!prev.latestVodAtMs || createdAtMs > prev.latestVodAtMs) {
-            prev.latestVodAtMs = createdAtMs;
-            prev.latestVodEndAtMs = endAtMs;
-          }
-          if (!prev.sampleVodUrl) prev.sampleVodUrl = String(v?.url || '').trim() || null;
-          if (!prev.sampleVodTitle) prev.sampleVodTitle = String(v?.title || '').trim() || null;
-          if (!prev.displayName || prev.displayName === prev.login) {
-            prev.displayName = displayName || prev.login;
-          }
-
-          channelByUserId.set(userId, prev);
+            userLogin: login,
+            userName: displayName || login,
+            createdAtMs,
+            endAtMs,
+            viewCount,
+            url: String(v?.url || '').trim() || null,
+            title: String(v?.title || '').trim() || null,
+          });
         }
 
         if (reachedPastStart) break;
@@ -418,13 +808,9 @@ export default function StaticChannelsPage() {
         if (!cursor) break;
       }
 
-      const results = Array.from(channelByUserId.values())
-        .sort((a, b) => (asFiniteNumber(b.maxViewCount, 0) - asFiniteNumber(a.maxViewCount, 0)) || (asFiniteNumber(b.latestVodAtMs, 0) - asFiniteNumber(a.latestVodAtMs, 0)))
-        .slice(0, 200);
-
-      setDiscoverResults(results);
-      saveDiscoveryCache(cacheKey, results);
-      setDiscoverStatus(`Found ${results.length} channel(s)`);
+      setDiscoverVods(fetchedVods);
+      saveDiscoveryCache(cacheKey, { vods: fetchedVods });
+      setDiscoverStatus(`Fetched ${fetchedVods.length} VOD(s)`);
     } catch (e) {
       setDiscoverStatus(e instanceof Error ? e.message : 'Discovery failed');
     } finally {
@@ -443,7 +829,9 @@ export default function StaticChannelsPage() {
       return;
     }
 
-    const next = [...channels, makeNewChannel({ login, displayName, broadcasterId })].map((c, i) => ({ ...c, sortOrder: i }));
+    const seed = broadcasterId || login;
+    const nextColorHex = pickDefaultChannelColorHex(channels, seed);
+    const next = [...channels, makeNewChannel({ login, displayName, broadcasterId, colorHex: nextColorHex })].map((c, i) => ({ ...c, sortOrder: i }));
     persist(next);
     setStatus(`Added ${displayName || login}`);
   }
@@ -461,7 +849,14 @@ export default function StaticChannelsPage() {
       return;
     }
 
-    const appended = toAdd.map((r) => makeNewChannel({ login: r.login, displayName: r.displayName, broadcasterId: r.userId }));
+    const appended = toAdd.map((r) => {
+      const login = normalizeLogin(r.login);
+      const broadcasterId = String(r.userId || '').trim();
+      const displayName = String(r.displayName || '').trim();
+      const seed = broadcasterId || login;
+      const nextColorHex = pickDefaultChannelColorHex(channels, seed);
+      return makeNewChannel({ login, displayName, broadcasterId, colorHex: nextColorHex });
+    });
     const next = [...channels, ...appended].map((c, i) => ({ ...c, sortOrder: i }));
     persist(next);
     setStatus(`Added ${appended.length} channel(s) from visible results`);
@@ -491,6 +886,46 @@ export default function StaticChannelsPage() {
       return deduped.slice(0, 12);
     });
   }
+
+  function onSelectVideoType(t) {
+    if (!t || !t.id) return;
+    const next = { id: String(t.id), name: String(t.name || '') };
+    setSelectedVideoType(next);
+    setRecentVideoTypes((prev) => {
+      const base = Array.isArray(prev) ? prev : [];
+      const deduped = [next, ...base.filter((x) => String(x?.id || '') !== next.id)];
+      return deduped.slice(0, 12);
+    });
+  }
+
+  function onSelectLanguage(l) {
+    if (!l || !l.id) return;
+    const next = { id: String(l.id), name: String(l.name || '') };
+    setSelectedLanguage(next);
+    setRecentLanguages((prev) => {
+      const base = Array.isArray(prev) ? prev : [];
+      const deduped = [next, ...base.filter((x) => String(x?.id || '') !== next.id)];
+      return deduped.slice(0, 12);
+    });
+  }
+
+  useEffect(() => {
+    if (activePicker !== 'game') return;
+    if (!auth?.authed) return;
+    const q = String(gameQuery || '').trim();
+    if (q.length < 2) {
+      setGameOptions([]);
+      return;
+    }
+    let t = null;
+    t = setTimeout(() => {
+      searchGames();
+    }, 250);
+    return () => {
+      if (t) clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePicker, gameQuery, auth?.authed]);
 
   function move(channelId, dir) {
     const idx = channels.findIndex((c) => c.id === channelId);
@@ -588,72 +1023,70 @@ export default function StaticChannelsPage() {
         <Flex direction="column" gap="3">
           <Heading size="3">Discover channels from VODs</Heading>
           <Text size="2" color="gray">
-            Global discovery using Helix Videos by game. Filters: type=VOD (archive), language=en, VOD start time range.
+            Global discovery using Helix Videos by game and filters.
           </Text>
 
           <Flex direction="column" gap="2">
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Text size="2" color="gray">
-                Game search
-              </Text>
-              <Flex gap="2" align="end" wrap="wrap">
-                <input
-                  value={gameQuery}
-                  onChange={(e) => setGameQuery(e.target.value)}
-                  placeholder="e.g. Fortnite"
-                  style={{
-                    width: 320,
-                    padding: '10px 12px',
-                    borderRadius: 8,
-                    border: '1px solid rgba(255,255,255,0.18)',
-                    background: 'rgba(255,255,255,0.06)',
-                    color: 'inherit',
-                  }}
-                />
-                <Button type="button" variant="soft" onClick={searchGames} disabled={!auth?.authed}>
-                  Search games
-                </Button>
-              </Flex>
-            </label>
+            <Flex gap="3" wrap="wrap" align="end">
+              <CompactChipPicker
+                label="Game"
+                placeholder="Select game"
+                valueLabel={selectedGame?.name || ''}
+                isOpen={activePicker === 'game'}
+                onOpen={() => setActivePicker('game')}
+                onClose={() => setActivePicker(null)}
+                query={gameQuery}
+                setQuery={setGameQuery}
+                options={gameOptions}
+                onSelect={(g) => {
+                  onSelectGame(g);
+                  setActivePicker(null);
+                }}
+                recents={recentGames}
+              />
 
-            {gameOptions.length ? (
-              <Flex gap="2" wrap="wrap">
-                {gameOptions.map((g) => (
-                  <Button
-                    key={g.id}
-                    type="button"
-                    variant={selectedGame?.id === g.id ? 'solid' : 'soft'}
-                    onClick={() => onSelectGame(g)}
-                  >
-                    {g.name}
-                  </Button>
-                ))}
-              </Flex>
-            ) : null}
+              <CompactChipPicker
+                label="Video type"
+                placeholder="Select type"
+                valueLabel={selectedVideoType?.name || ''}
+                isOpen={activePicker === 'type'}
+                onOpen={() => setActivePicker('type')}
+                onClose={() => setActivePicker(null)}
+                query={videoTypeQuery}
+                setQuery={setVideoTypeQuery}
+                options={VIDEO_TYPE_OPTIONS.filter((t) => {
+                  const q = String(videoTypeQuery || '').trim().toLowerCase();
+                  if (!q) return true;
+                  return String(t.name || '').toLowerCase().includes(q) || String(t.id || '').toLowerCase().includes(q);
+                })}
+                onSelect={(t) => {
+                  onSelectVideoType(t);
+                  setActivePicker(null);
+                }}
+                recents={recentVideoTypes}
+              />
 
-            {recentGames.length ? (
-              <Flex direction="column" gap="1">
-                <Text size="2" color="gray">
-                  Recent games
-                </Text>
-                <Flex gap="2" wrap="wrap">
-                  {recentGames.map((g) => (
-                    <Button
-                      key={`recent_${g.id}`}
-                      type="button"
-                      variant={selectedGame?.id === g.id ? 'solid' : 'soft'}
-                      onClick={() => onSelectGame(g)}
-                    >
-                      {g.name}
-                    </Button>
-                  ))}
-                </Flex>
-              </Flex>
-            ) : null}
-
-            <Text size="2" color="gray">
-              Selected game: {selectedGame?.name || '—'}
-            </Text>
+              <CompactChipPicker
+                label="Language"
+                placeholder="Select language"
+                valueLabel={selectedLanguage?.name || ''}
+                isOpen={activePicker === 'language'}
+                onOpen={() => setActivePicker('language')}
+                onClose={() => setActivePicker(null)}
+                query={languageQuery}
+                setQuery={setLanguageQuery}
+                options={LANGUAGE_OPTIONS.filter((l) => {
+                  const q = String(languageQuery || '').trim().toLowerCase();
+                  if (!q) return true;
+                  return String(l.name || '').toLowerCase().includes(q) || String(l.id || '').toLowerCase().includes(q);
+                })}
+                onSelect={(l) => {
+                  onSelectLanguage(l);
+                  setActivePicker(null);
+                }}
+                recents={recentLanguages}
+              />
+            </Flex>
           </Flex>
 
           <Flex gap="3" wrap="wrap" align="end">
@@ -735,6 +1168,128 @@ export default function StaticChannelsPage() {
                   }}
                 />
               </Flex>
+            </label>
+          </Flex>
+
+          <Flex gap="3" wrap="wrap" align="end">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <input type="checkbox" checked={startTodEnabled} onChange={(e) => setStartTodEnabled(e.target.checked)} />
+              <Text size="2" color="gray">
+                VOD start time-of-day
+              </Text>
+            </label>
+
+            <Flex direction="column" gap="1" style={{ minWidth: 320 }}>
+              <Text size="2" color="gray">
+                Time zone
+              </Text>
+              <TimeZonePicker
+                variant="chip"
+                initialTimeZone={startTodTimeZone || 'UTC'}
+                recentsStorageKey="t24_recent_time_zones_v1"
+                label="Time zone"
+                placeholder="Type to filter…"
+                onChange={(tz) => setStartTodTimeZone(tz)}
+              />
+            </Flex>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                Start (HH:MM)
+              </Text>
+              <input
+                type="time"
+                value={startTodFrom}
+                onChange={(e) => setStartTodFrom(e.target.value)}
+                style={{
+                  width: 140,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: 'inherit',
+                }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                End (HH:MM)
+              </Text>
+              <input
+                type="time"
+                value={startTodTo}
+                onChange={(e) => setStartTodTo(e.target.value)}
+                style={{
+                  width: 140,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: 'inherit',
+                }}
+              />
+            </label>
+          </Flex>
+
+          <Flex gap="3" wrap="wrap" align="end">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <input type="checkbox" checked={endTodEnabled} onChange={(e) => setEndTodEnabled(e.target.checked)} />
+              <Text size="2" color="gray">
+                VOD end time-of-day
+              </Text>
+            </label>
+
+            <Flex direction="column" gap="1" style={{ minWidth: 320 }}>
+              <Text size="2" color="gray">
+                Time zone
+              </Text>
+              <TimeZonePicker
+                variant="chip"
+                initialTimeZone={endTodTimeZone || 'UTC'}
+                recentsStorageKey="t24_recent_time_zones_v1"
+                label="Time zone"
+                placeholder="Type to filter…"
+                onChange={(tz) => setEndTodTimeZone(tz)}
+              />
+            </Flex>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                Start (HH:MM)
+              </Text>
+              <input
+                type="time"
+                value={endTodFrom}
+                onChange={(e) => setEndTodFrom(e.target.value)}
+                style={{
+                  width: 140,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: 'inherit',
+                }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Text size="2" color="gray">
+                End (HH:MM)
+              </Text>
+              <input
+                type="time"
+                value={endTodTo}
+                onChange={(e) => setEndTodTo(e.target.value)}
+                style={{
+                  width: 140,
+                  padding: '10px 12px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: 'inherit',
+                }}
+              />
             </label>
           </Flex>
 

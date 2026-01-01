@@ -62,7 +62,12 @@ export default async function SettingsPage() {
               <Text size="2" color="gray">
                 Time zone
               </Text>
-              <TimeZonePicker initialTimeZone={user.timeZone || 'UTC'} />
+              <TimeZonePicker
+                initialTimeZone={user.timeZone || 'UTC'}
+                variant="chip"
+                label="Time zone"
+                placeholder="Type to filter…"
+              />
             </Flex>
 
             <Button type="submit">Save</Button>
